@@ -27,6 +27,7 @@
 #include "../netproto/ContentHash.h"
 #include "../plugin/sync/Interp.h"
 #include "../plugin/core/OwnRanks.h"
+#include "../plugin/core/SessionRegistry.h"
 #include "../plugin/core/SteamId.h"
 #include "../plugin/core/WorkPose.h"
 #include "../plugin/core/DeathLatch.h"
@@ -1766,6 +1767,79 @@ static void testChangeGate() {
           gateShouldSend(true, 80001, 80000, 0, 10000, false));
 }
 
+static SessionRegistry::SquadClaims claim(u32 rank) {
+    SessionRegistry::SquadClaims ranks; ranks.insert(rank); return ranks;
+}
+
+static void testSessionRegistry() {
+    std::printf("\n== N-player admission policy (no live clients) ==\n");
+    for (u32 count = 2; count <= 4; ++count) {
+        SessionRegistry session;
+        CHECK("configure 2/3/4 participant session", session.configure(count, claim(7)));
+        std::vector<u32> ids;
+        for (u32 rank = 0; rank < count - 1; ++rank) {
+            u32 id;
+            CHECK_EQ("admit unique squad", session.admit(claim(rank), id), SessionRegistry::ACCEPTED);
+            ids.push_back(id);
+            CHECK("admitted owner holds its squad", session.owns(id, rank));
+        }
+        CHECK_EQ("capacity includes host", session.owners().size(), count);
+        u32 rejected = 0;
+        CHECK_EQ("reject session overflow", session.admit(claim(100), rejected), SessionRegistry::SESSION_FULL);
+        CHECK_EQ("failed admit has no identity", rejected, OWNER_ID_ALL);
+        CHECK_EQ("reject duplicate active claim", session.admit(claim(0), rejected), SessionRegistry::CLAIM_TAKEN);
+        CHECK("duplicate cannot evict incumbent", session.owns(ids[0], 0));
+        CHECK("remove departed owner", session.remove(ids[0]));
+        CHECK_EQ("departed claim released", session.squadOwner(0), OWNER_ID_ALL);
+        CHECK("host remains", session.owns(0, 7));
+        for (u32 rank = 1; rank < count - 1; ++rank)
+            CHECK("other participant survives leave", session.owns(ids[rank], rank));
+        u32 rejoined;
+        CHECK_EQ("reconnect after release", session.admit(claim(0), rejoined), SessionRegistry::ACCEPTED);
+        CHECK("reconnect has fresh identity", rejoined > ids.back());
+        CHECK("old identity has no authority", !session.owns(ids[0], 0));
+        CHECK("duplicate leave is harmless", !session.remove(ids[0]));
+        CHECK_EQ("reconnect restores capacity", session.owners().size(), count);
+    }
+
+    SessionRegistry session;
+    CHECK_EQ("default policy is 32", session.maxPlayers(), 32);
+    CHECK("reject zero capacity", !session.configure(0, claim(0)));
+    CHECK("reject one-player capacity", !session.configure(1, claim(0)));
+    CHECK("reject reserved capacity", !session.configure(OWNER_ID_ALL, claim(0)));
+    CHECK("reject empty host claims", !session.configure(4, SessionRegistry::SquadClaims()));
+    CHECK("reject reserved squad", !session.configure(4, claim(OWNER_ID_ALL)));
+    CHECK("failed configuration preserves host", session.owns(0, 0));
+    u32 id;
+    CHECK_EQ("reject empty join claims", session.admit(SessionRegistry::SquadClaims(), id), SessionRegistry::INVALID_CLAIMS);
+    CHECK_EQ("reject reserved join squad", session.admit(claim(OWNER_ID_ALL), id), SessionRegistry::INVALID_CLAIMS);
+    CHECK("cannot remove host", !session.remove(0));
+    CHECK("cannot remove unknown owner", !session.remove(1234));
+    CHECK("sentinel never owns an unclaimed squad", !session.owns(OWNER_ID_ALL, 99));
+    for (u32 rank = 1; rank < 32; ++rank)
+        CHECK_EQ("synthetic default-capacity admission", session.admit(claim(rank), id), SessionRegistry::ACCEPTED);
+    CHECK_EQ("synthetic default-capacity full", session.admit(claim(32), id), SessionRegistry::SESSION_FULL);
+    CHECK("cannot reconfigure active session", !session.configure(64, claim(2)));
+    CHECK_EQ("rejected reconfiguration preserves capacity", session.maxPlayers(), 32);
+
+    SessionRegistry churn;
+    for (u32 round = 0; round < 70; ++round) {
+        CHECK_EQ("repeated reconnect admission", churn.admit(claim(1000), id), SessionRegistry::ACCEPTED);
+        CHECK_EQ("owner IDs do not recycle", id, round + 1);
+        CHECK("release only reconnected owner", churn.remove(id));
+    }
+    CHECK("owner identity range exceeds policy limit", id > 32);
+    SessionRegistry::SquadClaims multiple = claim(42); multiple.insert(1000);
+    CHECK_EQ("owner can claim multiple squads", churn.admit(multiple, id), SessionRegistry::ACCEPTED);
+    u32 other;
+    SessionRegistry::SquadClaims overlap = claim(1000); overlap.insert(5000);
+    CHECK_EQ("overlap rejects entire claim", churn.admit(overlap, other), SessionRegistry::CLAIM_TAKEN);
+    CHECK_EQ("rejected claim leaves no partial reservation", churn.squadOwner(5000), OWNER_ID_ALL);
+    CHECK("remove multi-squad owner", churn.remove(id));
+    CHECK_EQ("all of departed owner's claims released", churn.squadOwner(42), OWNER_ID_ALL);
+    CHECK_EQ("second departed claim released", churn.squadOwner(1000), OWNER_ID_ALL);
+}
+
 int main() {
     std::printf("prototest: KenshiCoop wire/hash/interp unit layer (protocol v%u)\n",
                 (unsigned)PROTOCOL_VERSION);
@@ -1782,6 +1856,7 @@ int main() {
     testContentHash();
     testInterp();
     testOwnRanks();
+    testSessionRegistry();
     testSteamIdParse();
     testWorkPoseMatch();
     testTaskClear();
