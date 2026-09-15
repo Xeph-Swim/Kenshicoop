@@ -44,7 +44,12 @@ Logs from the final verification are in ignored `build/n-player-units.log`.
 
 See [baseline and initial audit](N_PLAYER_BASELINE.md) for the exact unmodified
 DLL build failures. v100 and SDK 7.1 now work; the selected matching KenshiLib
-0.3.0 headers still have duplicate enum and incomplete CraftingItem definitions.
+0.3.0 headers have an incomplete CraftingItem declaration. The duplicate
+BuildingDesignation failure is now resolved by the tracked, hash-verified
+[compatibility patch](../third_party/kenshilib_patches/README.md); its setup
+integration tests pass 8/8. Rebuilding after that single patch exits 1 with
+CraftingItem as the new first compiler error. No additional header fix was
+applied, and post-DLL baseline tests remain pending.
 A verified compatible header set is needed before the DLL can be built and
 live regression testing can begin. No compiler retarget or fabricated engine
 definition was used to work around those errors.

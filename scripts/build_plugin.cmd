@@ -30,6 +30,9 @@ set "VS10=C:\Program Files (x86)\Microsoft Visual Studio 10.0"
 set "VC=%VS10%\VC"
 set "SDK=C:\Program Files\Microsoft SDKs\Windows\v7.1"
 set "KL=%REPO%\third_party\KenshiLib_deps"
+REM Deterministic project properties as well as INCLUDE/LIB; ignore stale user vars.
+set "KENSHILIB_DIR=%KL%\KenshiLib"
+set "BOOST_INCLUDE_PATH=%KL%\boost_1_60_0"
 set "ENET=%REPO%\third_party\enet\enet\include"
 
 REM Fail before MSBuild's SDK discovery obscures a missing legacy compiler.
@@ -45,6 +48,9 @@ if not exist "%SDK%\Include\Windows.h" (
 )
 
 REM Locate MSBuild via vswhere (falls back to a common path).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\scripts\apply_kenshilib_patches.ps1"
+if errorlevel 1 exit /b 1
+
 set "MSBUILD="
 for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" 2^>nul`) do set "MSBUILD=%%i"
 if not defined MSBUILD set "MSBUILD=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"

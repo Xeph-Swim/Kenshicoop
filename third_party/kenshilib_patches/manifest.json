@@ -1,0 +1,17 @@
+{
+  "snapshot": "KenshiLib 0.3.0 headers in KenshiLib_Examples_deps e75769b60dc7e7f0161580b1e86a01912f6404dd",
+  "patches": [
+    {
+      "file": "0001-canonical-building-designation.patch",
+      "path": "KenshiLib/Include/kenshi/Platoon.h",
+      "beforeSha256": "eed2e6e94fd61ae10c5195083707e2dcb3aea541cf71cc8d0d8af47357651854",
+      "afterSha256": "48e8a96b073eed92b118f96f9eee7439ddf7220293ef1750fe8deec6b7ef25ad",
+      "guards": [
+        {
+          "sha256": "db6d06d932ce4e8d4cc7abc540b225f396a7e0f3c1da3d30053c1f25c8dd5d4b",
+          "path": "KenshiLib/Include/kenshi/Building/Building.h"
+        }
+      ]
+    }
+  ]
+}

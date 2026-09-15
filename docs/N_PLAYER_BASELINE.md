@@ -1,5 +1,11 @@
 # N-player baseline and initial port audit
 
+Latest compatibility update: the tracked KenshiLib patch mechanism now resolves
+BuildingDesignation without changing its canonical enum. The subsequent v100
+build still exits 1; its first compiler error is incomplete CraftingItem.
+See [patch evidence and validation](../third_party/kenshilib_patches/README.md).
+The following sections preserve the earlier baseline history.
+
 ## Resumed session: compiler available; dependency header blockers remain
 
 The legacy compiler and SDK 7.1 were installed before this resumed run.

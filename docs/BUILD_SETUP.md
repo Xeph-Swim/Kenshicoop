@@ -35,6 +35,30 @@ before applying a patch twice. `third_party/vc10_compat` supplies header shims.
 
 ## Build
 
+### Repository-local dependency setup
+
+`build_plugin.cmd` resolves `KENSHILIB_DIR` and `BOOST_INCLUDE_PATH` from its
+own repository root and sets them inside `setlocal`, alongside `INCLUDE` and
+`LIB`. Builds do not depend on old user-level paths such as `F:\Kenshi`.
+It also invokes the [tracked KenshiLib compatibility patch setup](../third_party/kenshilib_patches/README.md),
+which checks source hashes and applies only required patches idempotently.
+Unsupported or manually modified headers fail clearly before compilation.
+
+For IDE sessions that read user environment variables, the intended values are
+`<repo>\third_party\KenshiLib_deps\KenshiLib` and
+`<repo>\third_party\KenshiLib_deps\boost_1_60_0` respectively. To update them
+from a PowerShell session at this repository root:
+
+```powershell
+[Environment]::SetEnvironmentVariable('KENSHILIB_DIR', (Join-Path $PWD 'third_party\KenshiLib_deps\KenshiLib'), 'User')
+[Environment]::SetEnvironmentVariable('BOOST_INCLUDE_PATH', (Join-Path $PWD 'third_party\KenshiLib_deps\boost_1_60_0'), 'User')
+```
+
+Restart the IDE/shell to inherit those values. They were corrected on this
+development machine on September 15, 2026; the command-line build remains
+deterministic without them. Dependency directories are still ignored; commit
+patches and their manifest, not the fetched library tree.
+
 From the repository root in PowerShell:
 
 ```powershell

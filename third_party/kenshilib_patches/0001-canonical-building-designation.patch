@@ -1,0 +1,35 @@
+diff --git a/KenshiLib/Include/kenshi/Platoon.h b/KenshiLib/Include/kenshi/Platoon.h
+--- a/KenshiLib/Include/kenshi/Platoon.h
++++ b/KenshiLib/Include/kenshi/Platoon.h
+@@ -8,6 +8,7 @@
+ #include <ogre/OgreMemoryAllocatorConfig.h>
+ #include <ogre/OgreVector3.h>
+ #include "Enums.h"
++#include "Building/Building.h"
+ 
+ enum PlatoonCreationMessage
+ {
+@@ -27,23 +28,6 @@ class PatrolInfo;
+ class AreaBiomeGroup;
+ class AreaSector;
+ 
+-// TODO move?
+-enum BuildingDesignation
+-{
+-    BD_NONE,
+-    BD_SHOP,
+-    BD_BARRACKS,
+-    BD_BAR,
+-    BD_HOSPITAL,
+-    BD_ARMOURY,
+-    BD_TREASURE,
+-    BD_PRISON,
+-    BD_HQ,
+-    BD_RESIDENTIAL,
+-    BD_SLAVE_STORAGE,
+-    BD_RESIDENTIAL_SMALL
+-};
+-
+ enum BuildingFunction;
+ 
+ class Ownerships
