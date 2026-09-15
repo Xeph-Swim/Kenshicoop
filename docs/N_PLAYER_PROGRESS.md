@@ -40,23 +40,23 @@ fresh IDs. These are data-model tests, **not** ENet sessions or live Kenshi
 clients. The ID exhaustion branch is inspected but not executed by these tests.
 Logs from the final verification are in ignored `build/n-player-units.log`.
 
-## Remaining work and blocker
+## Baseline build status and remaining work
 
-See [baseline and initial audit](N_PLAYER_BASELINE.md) for the exact unmodified
-DLL build failures. v100 and SDK 7.1 now work; the selected matching KenshiLib
-0.3.0 headers have an incomplete CraftingItem declaration. The duplicate
-BuildingDesignation failure is now resolved by the tracked, hash-verified
-[compatibility patch](../third_party/kenshilib_patches/README.md); its setup
-integration tests pass 8/8. Rebuilding after that single patch exits 1 with
-CraftingItem as the new first compiler error. No additional header fix was
-applied, and post-DLL baseline tests remain pending.
-A verified compatible header set is needed before the DLL can be built and
-live regression testing can begin. No compiler retarget or fabricated engine
-definition was used to work around those errors.
+See [baseline and initial audit](N_PLAYER_BASELINE.md) for the earlier failures
+and the completed baseline. Two tracked, hash-verified
+[compatibility patches](../third_party/kenshilib_patches/README.md) resolve the
+KenshiLib 0.3.0 `BuildingDesignation` duplication and its omitted complete
+`CraftingItem` definition. The latter is an exact port of the definition added
+by official KenshiLib commit `6f9168d`. Patch integration tests pass **13/13**.
+
+`cmd /c scripts\build_plugin.cmd` now exits 0 and links the Harness x64 DLL with
+the required v100 compiler. A fresh `scripts/verify.ps1` run also exits 0 with
+**842/842 C++ checks**, **32/32 harness contracts**, and **18/18 crawl fixture
+checks**. No compiler retarget or fabricated engine layout was used.
 
 The following remain unfinished:
 
-1. Complete the entire current-main and original-base PR #50 diff audit.
+1. Complete the remaining current-main and original-base PR #50 diff audit.
 2. Bind admitted owners to actual ENet connections, validate packet authors
    and squad/entity ownership, and add runtime `maxPlayers` configuration.
 3. Add a new protocol version and roster/claims encoding that preserves

@@ -12,6 +12,13 @@
           "path": "KenshiLib/Include/kenshi/Building/Building.h"
         }
       ]
+    },
+    {
+      "file": "0002-complete-crafting-item.patch",
+      "path": "KenshiLib/Include/kenshi/Building/CraftingBuilding.h",
+      "beforeSha256": "2ef5257c362e9f6f5624c1935148d65a75f3d45180ddfb1355f56b65a9b41c61",
+      "afterSha256": "1a02d7368114d36678eabaf0bb0a0211ced0c003d38989a7045c604885b91a07",
+      "guards": []
     }
   ]
 }

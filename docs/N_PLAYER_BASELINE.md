@@ -1,10 +1,33 @@
 # N-player baseline and initial port audit
 
-Latest compatibility update: the tracked KenshiLib patch mechanism now resolves
-BuildingDesignation without changing its canonical enum. The subsequent v100
-build still exits 1; its first compiler error is incomplete CraftingItem.
-See [patch evidence and validation](../third_party/kenshilib_patches/README.md).
-The following sections preserve the earlier baseline history.
+Latest compatibility update: the tracked KenshiLib patch mechanism resolves
+both KenshiLib 0.3.0 root header defects reached by this build. The v100 x64
+DLL baseline and zero-game protocol/unit suite now pass. See
+[patch evidence and validation](../third_party/kenshilib_patches/README.md).
+The following sections retain the earlier failure history for reproducibility.
+
+## Completed DLL and test baseline
+
+Recorded September 15, 2026 on `astra/n-player-32` after applying only the two
+tracked dependency compatibility patches:
+
+| Command | Result |
+| --- | --- |
+| `cmd /c scripts\build_plugin.cmd` | **Exit 0**; `Harness|x64`; v100 x64 compiler `16.00.40219.01`; DLL linked successfully |
+| KenshiLib patch integration tests | **Exit 0; 13/13 passed** |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1` | **Exit 0; overall PASS** |
+| C++ protocol/unit layer | **842/842 passed** |
+| Harness contract fixtures | **32/32 passed** |
+| Crawl oracle fixture | **18/18 passed** |
+
+The built `src/plugin/x64/Harness/KenshiCoop.dll` is 1,401,856 bytes. Warnings
+remain in legacy/project headers, but the build reports no compiler or linker
+errors. The command selects
+`C:\Program Files (x86)\Microsoft Visual Studio 10.0\VC\bin\amd64\cl.exe`.
+
+The second repair uses the complete `CraftingItem` definition and offsets added
+to the same header by official KenshiLib commit `6f9168d`; no alternate layout
+or compiler was substituted.
 
 ## Resumed session: compiler available; dependency header blockers remain
 
@@ -41,8 +64,8 @@ The branch remains `astra/n-player-32`, starting at `24c62bc`.
 - Baseline `scripts/verify.ps1 -SkipBuild`: **exit 0**, **522/522 C++ checks**,
   **32/32 harness contracts**, **18/18 crawl fixture checks**.
 
-The compiler blocker is resolved. A compatible, complete KenshiLib header set
-is still needed for a successful unchanged DLL baseline and live validation.
+These results were the precondition for resuming runtime N-player integration.
+They do not constitute live two-, three-, or four-player validation.
 
 ## Initial session: implementation blocked at the baseline build
 
@@ -171,7 +194,7 @@ gameplay port. No reference gameplay code was merged or cherry-picked.
 | Discovery, friend kit, menu changes | Defer independent UX features; not a prerequisite for the core port. |
 | Restored build documentation | Consulted and adapted into a current local guide, excluding stale machine/scenario claims. |
 
-## Changes and validation this session
+## Changes and validation in the initial blocked session
 
 - `scripts/build_plugin.cmd`: explicit v100/SDK 7.1 prerequisite errors;
   preserve MSBuild exit status across `endlocal`.
@@ -181,16 +204,13 @@ gameplay port. No reference gameplay code was merged or cherry-picked.
   and validation instructions.
 - `docs/N_PLAYER_BASELINE.md`: this baseline, findings, and remaining work.
 
-After changes both build entry points exit **1**, explicitly naming missing
-v100, as expected. `git diff --check` passes (only line-ending conversion
-warnings). The successful-compile and downstream MSBuild-failure paths cannot
-be exercised on this machine until prerequisites are restored.
+At that point both build entry points exited **1**, explicitly naming missing
+v100, as expected. Those historical blockers were later resolved; the current
+successful results are recorded at the top of this document.
 
 ## Remaining validation and next step
 
-**Next:** install/repair the v100 x64 + SDK 7.1 build environment, resolve
-MSBuild SDK detection, and rerun the baseline from these recorded revisions.
-Then finish the complete main/reference audit and implement incremental,
+**Next:** finish the remaining main/reference audit and implement incremental,
 buildable changes on `astra/n-player-32`:
 
 1. Pure admission/claim/packet-policy units, configurable `maxPlayers=32`,
@@ -203,7 +223,8 @@ buildable changes on `astra/n-player-32`:
 5. Exercise normal leave, timeout/crash, reconnect, duplicate slot, full
    session, malformed protocol, newcomer during play, and multi-peer save/load.
 
-All live 2/3/4-player tests, C++ tests, Steam sessions, WAN behavior, failure
-scenarios, and multi-peer saves remain **untested** in this session. No 32-client
-run was performed. Configured maximum 32 is a future policy default, not a
-statement of tested capacity or performance.
+Live 2/3/4-player sessions, Steam sessions, WAN behavior, runtime failure
+scenarios, and multi-peer saves remain **untested**. The zero-game C++ and
+PowerShell suites now pass as recorded above. No 32-client run was performed;
+configured maximum 32 is a policy default, not a tested capacity or performance
+claim.
