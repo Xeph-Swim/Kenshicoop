@@ -4,7 +4,7 @@ REM machine that has only "Windows SDK 7.1 + VC2010 SP1 compiler update" (no ful
 REM VS2010). We hand MSBuild a complete PATH/INCLUDE/LIB and UseEnv=true so it does
 REM not rely on VS2010 registry/SDK auto-detection.
 REM
-REM Prereqs (see resources/BUILD_SETUP.md):
+REM Prereqs (see docs/BUILD_SETUP.md):
 REM   - VC++ 2010 (v100) x64 compiler  (SDK 7.1 + KB2519277)
 REM   - VS2022 Build Tools (for MSBuild.exe)
 REM   - third_party/KenshiLib_deps (deps + Boost) and env vars set
@@ -32,6 +32,18 @@ set "SDK=C:\Program Files\Microsoft SDKs\Windows\v7.1"
 set "KL=%REPO%\third_party\KenshiLib_deps"
 set "ENET=%REPO%\third_party\enet\enet\include"
 
+REM Fail before MSBuild's SDK discovery obscures a missing legacy compiler.
+REM Never fall through to a modern cl.exe already on PATH.
+if not exist "%VC%\bin\amd64\cl.exe" (
+    echo ERROR: Required v100 x64 compiler missing: "%VC%\bin\amd64\cl.exe"
+    echo See docs\BUILD_SETUP.md. No toolchain substitution is supported.
+    exit /b 1
+)
+if not exist "%SDK%\Include\Windows.h" (
+    echo ERROR: Required Windows SDK 7.1 headers missing: "%SDK%\Include\Windows.h"
+    exit /b 1
+)
+
 REM Locate MSBuild via vswhere (falls back to a common path).
 set "MSBUILD="
 for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" 2^>nul`) do set "MSBUILD=%%i"
@@ -56,4 +68,6 @@ REM UseEnv=true: use the INCLUDE/LIB/PATH above instead of registry-derived path
 REM TrackFileAccess=false: avoid Tracker.exe TRK0002 under redirected shells.
 "%MSBUILD%" "%REPO%\src\plugin\KenshiCoop.vcxproj" /p:Configuration=%CONFIG% /p:Platform=x64 /p:UseEnv=true /p:TrackFileAccess=false /nologo /v:minimal
 
-endlocal
+REM Preserve MSBuild failure across ENDLOCAL; callers must not deploy a stale DLL.
+set "BUILD_EXIT=%ERRORLEVEL%"
+endlocal & exit /b %BUILD_EXIT%

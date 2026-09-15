@@ -17,6 +17,17 @@ set "VS10=C:\Program Files (x86)\Microsoft Visual Studio 10.0"
 set "VC=%VS10%\VC"
 set "SDK=C:\Program Files\Microsoft SDKs\Windows\v7.1"
 
+REM The packed-wire contract must use v100, even if another cl.exe is on PATH.
+if not exist "%VC%\bin\amd64\cl.exe" (
+    echo ERROR: Required v100 x64 compiler missing: "%VC%\bin\amd64\cl.exe"
+    echo See docs\BUILD_SETUP.md. No toolchain substitution is supported.
+    exit /b 1
+)
+if not exist "%SDK%\Include\Windows.h" (
+    echo ERROR: Required Windows SDK 7.1 headers missing: "%SDK%\Include\Windows.h"
+    exit /b 1
+)
+
 set "PATH=%VC%\bin\amd64;%VC%\bin;%VS10%\Common7\IDE;%SDK%\Bin\x64;%SDK%\Bin;%PATH%"
 set "INCLUDE=%VC%\include;%SDK%\Include;%REPO%\third_party\vc10_compat"
 set "LIB=%VC%\lib\amd64;%SDK%\Lib\x64"
