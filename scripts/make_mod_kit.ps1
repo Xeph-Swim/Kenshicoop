@@ -96,6 +96,7 @@ Copy-Item $mod  (Join-Path $modDir "KenshiCoop.mod")
   "transport": "steam",
   "ip": "127.0.0.1",
   "port": 27800,
+  "maxPlayers": 32,
   "autoConnect": false
 }
 '@ | Set-Content (Join-Path $modDir "coop_config.json") -Encoding UTF8

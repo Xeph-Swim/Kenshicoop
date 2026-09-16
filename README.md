@@ -15,8 +15,9 @@ either player makes becomes one shared save, streamed to both machines
 automatically.
 
 > **Status: work in progress.** This is a hobby project under active
-> development. Expect rough edges, desyncs, and crashes. Two players is the
-> current design target.
+> development. Expect rough edges, desyncs, and crashes. The normal release is
+> still the two-player path. A limited direct-UDP host plus two-client build is
+> available for the documented three-PC experiment.
 
 ## How it works
 
@@ -101,6 +102,13 @@ in-game, so the joining player doesn't need to load anything first.
 the host's address in `"ip"` / `"port"`. Then in the panel set **Transport: UDP**
 and go ONLINE. The `ip`/`port` are re-read whenever you go ONLINE, so no restart
 is needed after an edit.
+
+The host's participant limit is `"maxPlayers"` in `coop_config.json`, or
+`KENSHICOOP_MAX_PLAYERS` for scripted sessions. It defaults to 32. This is an
+admission policy, not a claim that 32 live clients have been tested. For the
+first host plus two-client field test, build the experimental kit and follow
+[the three-PC runbook](docs/THREE_PLAYER_EXPERIMENT.md). It uses direct UDP and
+disables systems that are not yet safe for three players.
 
 ### Good to know
 

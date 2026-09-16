@@ -13,6 +13,7 @@ dist/*.zip
 dist/*.dll
 dist/mod-kit/
 dist/remote-kit/
+dist/three-player-experimental/
 dist/KenshiCoop-remote-kit-*.zip
 
 # Manual co-op session captures (logs + screenshots)

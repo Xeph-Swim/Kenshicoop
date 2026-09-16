@@ -695,7 +695,7 @@ engine directly) so all mutation stays SEH-guarded on the main thread.
 ## 10. Wire protocol (`netproto/Protocol.h`)
 
 > **Note:** this section documents the original milestone protocol. The **live
-> protocol is `src/netproto/Wire.h`** (`PROTOCOL_VERSION = 36`, checked during
+> protocol is `src/netproto/Wire.h`** (`PROTOCOL_VERSION = 56`, checked during
 > handshake), which extends the same conventions (plain C++03, little-endian,
 > packed structs, `packetType`/`readPacket` helpers) with the full packet set:
 > inventory/equipment sync, cross-owner transfer intents (`PKT_INV_XFER`),
@@ -703,6 +703,9 @@ engine directly) so all mutation stays SEH-guarded on the main thread.
 > money/faction/time/speed, coordinated save/load streaming, and NPC census.
 > `Wire.h` is heavily commented per-packet and is the source of truth;
 > `src/prototest/main.cpp` asserts every struct size and round-trip.
+> Protocol 56 adds variable-length squad claims in HELLO, dynamic peer roster
+> rows, explicit admission rejection, and validated star-topology relay. See
+> `docs/PROTOCOL_HISTORY.md` for the current breaking change.
 
 namespace `coop`. Plain C++03, little-endian, packed structs sent as raw bytes.
 `PROTOCOL_VERSION = 5` (checked during handshake).
@@ -777,6 +780,8 @@ Read once in `startPlugin()`; no recompile needed to change role/behavior.
 - `KENSHICOOP_MODE` — `host` (default) or `join`.
 - `KENSHICOOP_IP` — host IP when joining (default `127.0.0.1`).
 - `KENSHICOOP_PORT` — UDP port (default `27800`).
+- `KENSHICOOP_MAX_PLAYERS` — host participant capacity including the host
+  (default `32`; `coop_config.json` key: `maxPlayers`).
 - `KENSHICOOP_SAVE` — existing save folder name to auto-load from the title screen (default empty = manual). Auto-loading a non-existent save crashes the game.
 - `KENSHICOOP_AUTOLOAD_DELAY_MS` — settle time before issuing the deferred load (default `5000`).
 - `KENSHICOOP_TEST_SECONDS` — if >0, self-exit (via `TerminateProcess`) this many seconds after gameplay starts (default `0` = never). Used by the test runner.
