@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Build the protocol-v56 host + two-client experimental direct-UDP kit.
+  Build the protocol-v56 experimental kit with one identical mod folder for
+  every PC and Steam P2P selected by default.
 #>
 [CmdletBinding()]
 param(
@@ -41,35 +42,26 @@ $root = Join-Path $repoRoot "dist\three-player-experimental"
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
 
-function Add-PlayerFolder([string]$Name, [string]$Role, [string]$OwnSquads,
-                          [string]$Ip) {
-    $folder = Join-Path $root "$Name\KenshiCoop"
-    New-Item -ItemType Directory -Force -Path $folder | Out-Null
-    Copy-Item $dll (Join-Path $folder "KenshiCoop.dll")
-    Copy-Item $json (Join-Path $folder "RE_Kenshi.json")
-    Copy-Item $mod (Join-Path $folder "KenshiCoop.mod")
-    @"
+$folder = Join-Path $root "KenshiCoop"
+New-Item -ItemType Directory -Force -Path $folder | Out-Null
+Copy-Item $dll (Join-Path $folder "KenshiCoop.dll")
+Copy-Item $json (Join-Path $folder "RE_Kenshi.json")
+Copy-Item $mod (Join-Path $folder "KenshiCoop.mod")
+@'
 {
-  // Protocol-v56 three-PC experiment. Keep these safety gates for the first run.
-  "role": "$Role",
-  "transport": "udp",
-  "ip": "$Ip",
-  "port": 27800,
+  // Protocol-v56 experiment. Install this exact folder on every PC.
+  // Role, squad ownership, and the other player's Steam ID are selected in
+  // the F2 panel for each session; nothing here is machine-specific.
+  "transport": "steam",
   "maxPlayers": 3,
-  "ownSquads": "$OwnSquads",
   "saveSync": false,
   "loadSync": false,
   "speedSync": false,
   "timeSync": false,
   "camInterest": false,
-  "autoConnect": true
+  "autoConnect": false
 }
-"@ | Set-Content (Join-Path $folder "coop_config.json") -Encoding UTF8
-}
-
-Add-PlayerFolder "Host"   "host" "0" "127.0.0.1"
-Add-PlayerFolder "Join-A" "join" "1" "HOST_LAN_IP"
-Add-PlayerFolder "Join-B" "join" "2" "HOST_LAN_IP"
+'@ | Set-Content (Join-Path $folder "coop_config.json") -Encoding UTF8
 
 Copy-Item (Join-Path $repoRoot "docs\THREE_PLAYER_EXPERIMENT.md") `
           (Join-Path $root "README.md")
@@ -83,19 +75,25 @@ $proto = if ($protoLine) { $protoLine.Matches[0].Groups[1].Value } else { "?" }
     protocolVersion = $proto
     builtUtc = (Get-Date).ToUniversalTime().ToString("o")
     config = "Release"
-    validationTarget = "host + two clients"
+    transport = "steam"
+    layout = "single-mod-folder"
+    validationTarget = "host + two clients (UDP automated; Steam P2P setup only)"
 } | ConvertTo-Json | Set-Content (Join-Path $root "PROVENANCE.json") -Encoding UTF8
 
-foreach ($copy in Get-ChildItem $root -Filter KenshiCoop.dll -Recurse) {
-    if ((Get-FileHash -Algorithm SHA256 $copy.FullName).Hash -ne $sha) {
-        throw "Packaged DLL differs from canonical Release DLL: $($copy.FullName)"
-    }
+if (@(Get-ChildItem $root -Filter KenshiCoop.dll -Recurse).Count -ne 1) {
+    throw "Expected exactly one packaged KenshiCoop.dll in the shared mod folder"
+}
+$copy = Get-ChildItem $root -Filter KenshiCoop.dll -Recurse | Select-Object -First 1
+if ((Get-FileHash -Algorithm SHA256 $copy.FullName).Hash -ne $sha) {
+    throw "Packaged DLL differs from canonical Release DLL: $($copy.FullName)"
 }
 
-$zip = Join-Path $repoRoot "dist\KenshiCoop-3player-experimental.zip"
+$zip = Join-Path $repoRoot "dist\KenshiCoop-3player-steam-experimental.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
+$legacyZip = Join-Path $repoRoot "dist\KenshiCoop-3player-experimental.zip"
+if (Test-Path $legacyZip) { Remove-Item $legacyZip -Force }
 Compress-Archive -Path (Join-Path $root "*") -DestinationPath $zip
 
-Write-Host "Three-player experimental kit: $zip"
+Write-Host "Three-player Steam experimental kit: $zip"
 Write-Host "Release DLL SHA-256: $sha"
 Write-Host "Protocol: v$proto"

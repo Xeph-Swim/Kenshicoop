@@ -107,8 +107,10 @@ The host's participant limit is `"maxPlayers"` in `coop_config.json`, or
 `KENSHICOOP_MAX_PLAYERS` for scripted sessions. It defaults to 32. This is an
 admission policy, not a claim that 32 live clients have been tested. For the
 first host plus two-client field test, build the experimental kit and follow
-[the three-PC runbook](docs/THREE_PLAYER_EXPERIMENT.md). It uses direct UDP and
-disables systems that are not yet safe for three players.
+[the three-PC runbook](docs/THREE_PLAYER_EXPERIMENT.md). The kit contains one
+identical mod folder for every PC and selects Steam P2P by default. The
+automated three-client gate remains on direct UDP because the current Steam
+tunnel still supports one remote peer.
 
 ### Good to know
 
