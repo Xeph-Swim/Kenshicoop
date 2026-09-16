@@ -54,8 +54,8 @@ Copy-Item $mod (Join-Path $folder "KenshiCoop.mod")
   // the F2 panel for each session; nothing here is machine-specific.
   "transport": "steam",
   "maxPlayers": 3,
-  "saveSync": false,
-  "loadSync": false,
+  "saveSync": true,
+  "loadSync": true,
   "speedSync": false,
   "timeSync": false,
   "camInterest": false,

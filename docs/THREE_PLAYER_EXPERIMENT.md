@@ -48,9 +48,10 @@ required on all three PCs. Do not make Host, Join-A, or Join-B copies.
 Keep Steam running and online on all PCs. No IP address, port forwarding, or
 per-machine config edit is needed for the Steam setup.
 
-The experimental configs deliberately set these channels off:
+The experimental config enables coordinated save and load transfer so a join
+can be brought into the host's world and later follow an authoritative save or
+load. It deliberately leaves these channels off:
 
-- coordinated save and load transfer;
 - shared speed voting and clock correction;
 - remote camera interest hints.
 
@@ -100,8 +101,8 @@ contain one-peer replication state. Avoid them in this first field test:
 
 - Steam P2P transport: its tunnel still tracks one remote Steam peer. Do not
   treat a three-client Steam run as supported; use the UDP path for that gate.
-- Save transfer, coordinated save, and coordinated load. Keep the three local
-  save copies disposable and do not save during the connected test.
+- Save/load transfer is enabled, but keep the save disposable. Do not interrupt
+  a transfer or close either game while a save/load operation is in progress.
 - Shared speed voting and clock correction. Leave the game at 1x and do not
   pause from a join.
 - Remote camera-based interest. The experimental config disables it.
