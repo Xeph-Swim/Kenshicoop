@@ -98,6 +98,10 @@ std::string fileOr(const std::map<std::string, std::string>& f, const char* key,
     return std::string(def);
 }
 
+bool flagEnabled(const std::string& value) {
+    return value != "0" && value != "false" && value != "False" && value != "FALSE";
+}
+
 } // namespace
 
 void loadConfig(Config& c) {
@@ -109,6 +113,14 @@ void loadConfig(Config& c) {
     c.isHost      = (mode != "join");
     c.ip          = envOr("KENSHICOOP_IP", fileOr(f, "ip", "127.0.0.1").c_str());
     c.port        = std::atoi(envOr("KENSHICOOP_PORT", fileOr(f, "port", "27800").c_str()).c_str());
+    {
+        const unsigned long requested = std::strtoul(
+            envOr("KENSHICOOP_MAX_PLAYERS", fileOr(f, "maxPlayers", "32").c_str()).c_str(), 0, 10);
+        // ENet encodes peer IDs in 12 bits. Keep the participant policy within
+        // that transport ceiling while owner IDs on the wire remain full u32.
+        c.maxPlayers = (requested >= 2 && requested <= 4095)
+            ? (unsigned int)requested : 32u;
+    }
     c.save        = envOr("KENSHICOOP_SAVE", "");
     c.testSeconds = std::atoi(envOr("KENSHICOOP_TEST_SECONDS", "0").c_str());
 
@@ -193,7 +205,8 @@ void loadConfig(Config& c) {
     // host, combat caps fast-forward at 1x. "0" is the A/B escape hatch. The
     // speed_probe spike (which drives the quiet/loud writers directly) and
     // time_probe force it OFF via their manifest DiagEnv (KENSHICOOP_SPEED_SYNC=0).
-    c.speedSync = envOr("KENSHICOOP_SPEED_SYNC", "1") != "0";
+    c.speedSync = flagEnabled(envOr("KENSHICOOP_SPEED_SYNC",
+                                   fileOr(f, "speedSync", "1").c_str()));
     c.speedCombatCap = envOr("KENSHICOOP_SPEED_COMBAT_CAP", "1") != "0";
     c.trackMove = envOr("KENSHICOOP_TRACK_MOVE", "0") == "1";
 
@@ -224,14 +237,17 @@ void loadConfig(Config& c) {
     c.spawnSync   = envOr("KENSHICOOP_SPAWN_SYNC", "1") != "0";
     c.recruitSync = envOr("KENSHICOOP_RECRUIT_SYNC", "1") != "0";
     c.factionSync = envOr("KENSHICOOP_FACTION_SYNC", "1") != "0";
-    c.timeSync    = envOr("KENSHICOOP_TIME_SYNC", "1") != "0";
+    c.timeSync    = flagEnabled(envOr("KENSHICOOP_TIME_SYNC",
+                                     fileOr(f, "timeSync", "1").c_str()));
     c.timeBrake   = envOr("KENSHICOOP_TIME_BRAKE", "1") != "0";
     c.doorSync    = envOr("KENSHICOOP_DOOR_SYNC", "1") != "0";
     c.buildSync   = envOr("KENSHICOOP_BUILD_SYNC", "1") != "0";
     c.bdoorSync   = envOr("KENSHICOOP_BDOOR_SYNC", "1") != "0";
     c.hungerSync  = envOr("KENSHICOOP_HUNGER_SYNC", "1") != "0";
-    c.saveSync    = envOr("KENSHICOOP_SAVE_SYNC", "1") != "0";
-    c.loadSync    = envOr("KENSHICOOP_LOAD_SYNC", "1") != "0";
+    c.saveSync    = flagEnabled(envOr("KENSHICOOP_SAVE_SYNC",
+                                     fileOr(f, "saveSync", "1").c_str()));
+    c.loadSync    = flagEnabled(envOr("KENSHICOOP_LOAD_SYNC",
+                                     fileOr(f, "loadSync", "1").c_str()));
     c.prodSync    = envOr("KENSHICOOP_PROD_SYNC", "1") != "0";
     c.researchSync = envOr("KENSHICOOP_RESEARCH_SYNC", "1") != "0";
     c.deedSync    = envOr("KENSHICOOP_DEED_SYNC", "1") != "0";
@@ -279,21 +295,21 @@ void loadConfig(Config& c) {
         c.interpMaxCadenceDelayMs = (v > 0) ? (unsigned int)v : 1200u;
         v = std::atoi(envOr("KENSHICOOP_INTERP_STALE_MS", "0").c_str());
         c.interpStaleMs = (v > 0) ? (unsigned int)v : 2000u;
-        double f;
-        f = std::atof(envOr("KENSHICOOP_INTERP_SNAP_DIST", "0").c_str());
-        c.interpSnapDist = (f > 0.0) ? (float)f : 50.0f;
+        double tune;
+        tune = std::atof(envOr("KENSHICOOP_INTERP_SNAP_DIST", "0").c_str());
+        c.interpSnapDist = (tune > 0.0) ? (float)tune : 50.0f;
         // The A/B control for the cadence-scaled buffer is
         // KENSHICOOP_INTERP_MAX_CADENCE_DELAY_MS=200, which pins the ceiling
         // back to interpMaxDelayMs for every tier. K alone cannot: the mid
         // band's ~500 ms cadence still clears 200 ms at any K above 0.4.
-        f = std::atof(envOr("KENSHICOOP_INTERP_CADENCE_K", "0").c_str());
-        c.interpCadenceK = (f > 0.0) ? (float)f : 2.0f;
-        f = std::atof(envOr("KENSHICOOP_CATCHUP_K", "0").c_str());
-        c.catchupK = (f > 0.0) ? (float)f : 2.0f;
-        f = std::atof(envOr("KENSHICOOP_SNAP_DIST", "0").c_str());
-        c.snapDist = (f > 0.0) ? (float)f : 8.0f;
-        f = std::atof(envOr("KENSHICOOP_SNAP_SECONDS", "0").c_str());
-        c.snapSeconds = (f > 0.0) ? (float)f : 0.75f;
+        tune = std::atof(envOr("KENSHICOOP_INTERP_CADENCE_K", "0").c_str());
+        c.interpCadenceK = (tune > 0.0) ? (float)tune : 2.0f;
+        tune = std::atof(envOr("KENSHICOOP_CATCHUP_K", "0").c_str());
+        c.catchupK = (tune > 0.0) ? (float)tune : 2.0f;
+        tune = std::atof(envOr("KENSHICOOP_SNAP_DIST", "0").c_str());
+        c.snapDist = (tune > 0.0) ? (float)tune : 8.0f;
+        tune = std::atof(envOr("KENSHICOOP_SNAP_SECONDS", "0").c_str());
+        c.snapSeconds = (tune > 0.0) ? (float)tune : 0.75f;
         // Combat convergence bands (0 = keep the drive's ReplicatorUtil default).
         c.combatSoftDist    = (float)std::atof(envOr("KENSHICOOP_COMBAT_SOFT_DIST", "0").c_str());
         c.combatSnapDist    = (float)std::atof(envOr("KENSHICOOP_COMBAT_SNAP_DIST", "0").c_str());
@@ -392,7 +408,8 @@ void loadConfig(Config& c) {
         // Camera-anchored interest (protocol 43): fold the local camera +
         // peer camera hint into the interest anchors. DEFAULT ON; the A/B
         // escape hatch restores tab-leader-only anchors.
-        c.camInterest = envOr("KENSHICOOP_CAM_INTEREST", "1") != "0";
+        c.camInterest = flagEnabled(envOr("KENSHICOOP_CAM_INTEREST",
+                                         fileOr(f, "camInterest", "1").c_str()));
         // Task-selection observation spike: OFF by default (diagnostic only).
         c.taskSelectSpike = envOr("KENSHICOOP_TASK_SPIKE", "0") != "0";
         // Jail put-to-work desync spike: OFF by default (diagnostic only).
@@ -419,11 +436,14 @@ void loadConfig(Config& c) {
     c.scenarioArmTimeoutMs = (armTimeout > 0) ? (unsigned long)armTimeout : 0ul;
 
     // Ownership squad-tab ranks: parse a CSV of unsigned ints (e.g. "0", "1", "1,2").
-    // KENSHICOOP_OWN_SQUAD is primary; KENSHICOOP_OWN_RANK is an accepted alias. Empty
-    // env -> default (host owns tab {0} / join owns tab {1}).
+    // KENSHICOOP_OWN_SQUAD is primary; KENSHICOOP_OWN_RANK is an accepted alias;
+    // coop_config.json uses the quoted string key "ownSquads". Empty -> the
+    // backward-compatible default (host {0}, join {1}).
     c.ownRanks.clear();
     {
-        std::string ranks = envOr("KENSHICOOP_OWN_SQUAD", envOr("KENSHICOOP_OWN_RANK", "").c_str());
+        std::string ranks = envOr(
+            "KENSHICOOP_OWN_SQUAD",
+            envOr("KENSHICOOP_OWN_RANK", fileOr(f, "ownSquads", "").c_str()).c_str());
         c.ownRanksFromEnv = parseRankList(ranks, c.ownRanks);
         resolveOwnRanks(c.ownRanks, c.isHost, c.ownRanksFromEnv);
     }
@@ -436,6 +456,12 @@ std::string describeConfig(const Config& c) {
     s += " scenario='" + c.scenario + "'";
     if (!c.setupScene.empty()) s += " setup='" + c.setupScene + "'";
     s += " transport=" + c.transport;
+    {
+        char capacity[32];
+        _snprintf(capacity, sizeof(capacity) - 1, " maxPlayers=%u", c.maxPlayers);
+        capacity[sizeof(capacity) - 1] = '\0';
+        s += capacity;
+    }
     struct Flag { const char* name; bool on; };
     const Flag flags[] = {
         { "inv",     c.invSync },      { "xfer",    c.xferSync },

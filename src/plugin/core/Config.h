@@ -15,6 +15,7 @@ struct Config {
     bool          isHost;          // KENSHICOOP_MODE != "join"
     std::string   ip;              // KENSHICOOP_IP   (join target)
     int           port;            // KENSHICOOP_PORT
+    unsigned int  maxPlayers;      // KENSHICOOP_MAX_PLAYERS (host policy; default 32)
     std::string   save;            // KENSHICOOP_SAVE (auto-load; empty = manual)
     int           testSeconds;     // KENSHICOOP_TEST_SECONDS (0 = no self-exit)
     std::string   logPath;         // KENSHICOOP_LOG

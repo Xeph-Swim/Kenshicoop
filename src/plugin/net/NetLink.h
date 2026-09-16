@@ -18,10 +18,13 @@
 #include <vector>
 #include <deque>
 #include <map>
+#include <set>
 #include <enet/enet.h>
 
 #include "../../netproto/Wire.h"
 #include "../core/Inbound.h"
+#include "../core/SessionRegistry.h"
+#include "../core/SessionProtocol.h"
 
 namespace coop {
 
@@ -35,6 +38,11 @@ public:
     bool startHost(int port, Inbound* inbound);
     bool startClient(const std::string& ip, int port, Inbound* inbound);
     void stop();
+
+    // MAIN thread, before startHost/startClient: configure the participant
+    // policy and the complete set of squad slots this process owns.
+    bool setSessionConfig(unsigned int maxPlayers,
+                          const std::set<unsigned int>& localClaims);
 
     // MAIN thread: publish this peer's owned entities (copied under lock). The
     // net thread re-broadcasts the latest snapshot each tick. Pass count 0 to
@@ -231,6 +239,18 @@ private:
     void deliverEntity(u32 ownerId, u32 sendMs, const EntityState& e);
     void flushDelayed();
 
+    // Net-thread-only session routing and roster helpers.
+    void relayToOthers(ENetPeer* from, enet_uint8 channel, const ENetPacket* packet);
+    void broadcastToAdmitted(enet_uint8 channel, ENetPacket* packet);
+    void sendStatusTo(ENetPeer* to, u32 ownerId,
+                      const SessionRegistry::SquadClaims& claims, bool present);
+    void broadcastStatusExcept(u32 exceptId, u32 ownerId,
+                               const SessionRegistry::SquadClaims& claims, bool present);
+    void rejectPeer(ENetPeer* peer, u8 reason, const char* detail);
+    void dropPeer(u32 ownerId, bool announce);
+    bool acceptGameplayPacket(ENetPeer* from, u8 type,
+                              const void* data, unsigned len);
+
     // Net-thread-only (protocol 44): gate an incoming entity batch by its session
     // epoch. Returns false (drop) if 'epoch' is older than the newest accepted
     // from 'ownerId'; otherwise records it and returns true. epochSeen_ is reset
@@ -245,6 +265,12 @@ private:
     ENetHost*   enetHost_;   // net thread only
     ENetPeer*   serverPeer_; // client only; net thread only
     Inbound*    inbound_;
+
+    unsigned int                 maxPlayers_;
+    SessionRegistry::SquadClaims localClaims_;
+    SessionRegistry              session_;
+    std::map<u32, ENetPeer*>     peersById_;   // host only
+    std::set<u32>                activeOwners_; // join-side roster
 
     CRITICAL_SECTION         outCs_;
     std::vector<EntityState> out_;

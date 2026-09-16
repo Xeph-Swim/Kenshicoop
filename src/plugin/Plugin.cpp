@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <string>
 #include <deque>
+#include <set>
 
 #include "CoopLog.h"
 #include "core/Config.h"
@@ -103,7 +104,8 @@ struct SessionController {
     DWORD        gameStartTick;    // GetTickCount at the gameplay-start edge
     bool         autoLoadDone;     // title auto-load fired (settle gate)
     DWORD        titleFirstTick;   // first title tick (settle gate base)
-    bool         peerPresent;      // a peer is connected right now
+    bool         peerPresent;      // cached aggregate for the existing UI/gates
+    std::set<coop::u32> peersPresent; // stable owner ids currently in the roster
     // Coordinated save (protocol 31).
     std::string  savePending;      // host: save name awaiting quiescence
     coop::u32    saveReqId;        // join: monotonic PKT_SAVE_REQ counter
@@ -150,6 +152,7 @@ DWORD&       g_gameStartTick   = g_session.gameStartTick;
 bool&        g_autoLoadDone    = g_session.autoLoadDone;
 DWORD&       g_titleFirstTick  = g_session.titleFirstTick;
 bool&        g_peerPresent     = g_session.peerPresent;
+std::set<coop::u32>& g_peersPresent = g_session.peersPresent;
 std::string& g_savePending     = g_session.savePending;
 coop::u32&   g_saveReqId       = g_session.saveReqId;
 bool&        g_bootstrapArmed  = g_session.bootstrapArmed;
@@ -240,6 +243,7 @@ void warnIfNoPortraits(const std::string& name) {
 // clearing the maps - else a reconnect leaves orphaned duplicates or bakes them
 // into the next save. Falls back to a plain map reset if no world has ticked yet.
 void sessionResetForUi() {
+    g_peersPresent.clear();
     g_peerPresent = false;
     if (g_lastGw) g_repl.clearPeerReplicationState(g_lastGw);
     else          g_repl.resetSession();
@@ -299,7 +303,8 @@ void processNetEvents(GameWorld* gw) {
         // per-channel safety resends (or never minting a pre-connect build).
         if (g_cfg.latejoinSync) g_repl.onPeerConnected(g_net, g_net.localId());
         else coopLog("[latejoin] connect edge seen, resync OFF (gate)");
-        g_peerPresent = true;
+        g_peersPresent.insert(*it);
+        g_peerPresent = !g_peersPresent.empty();
         // Coordinated save (protocol 31): while connected under save-sync,
         // the JOIN never writes a save locally - the host's save is
         // authoritative and a local save press forwards as PKT_SAVE_REQ.
@@ -319,26 +324,24 @@ void processNetEvents(GameWorld* gw) {
         _snprintf(b, sizeof(b) - 1, "handshake: peer left id=%u", (unsigned)*it);
         b[sizeof(b) - 1] = '\0';
         coopLog(b);
-        // Carried-body sync (protocol 18) + furniture occupancy (protocol 19):
-        // the departed peer's stream will never author its drop/exit edges -
-        // release any carry or occupancy its driven copies still hold.
-        if (gw && (g_cfg.carrySync || g_cfg.furnSync)) g_repl.sweepCarries(gw);
-        g_peerPresent = false;
-        // Coordinated save: disconnected = solo again; local saves must work.
-        if (!g_cfg.isHost && g_cfg.saveSync) {
-            coop::engine::setSaveSuppress(false);
-            coopLog("[save] JOIN save suppression OFF (peer left)");
+        if (*it == coop::OWNER_ID_ALL) {
+            // The host link ended.  This join's whole remote session is gone.
+            if (gw && (g_cfg.carrySync || g_cfg.furnSync)) g_repl.sweepCarries(gw);
+            g_peersPresent.clear();
+            g_repl.clearPeerReplicationState(gw);
+            g_inbound.flushWorldState();
+            if (!g_cfg.isHost && g_cfg.saveSync) {
+                coop::engine::setSaveSuppress(false);
+                coopLog("[save] JOIN save suppression OFF (host link lost)");
+            }
+        } else {
+            // One owner left a live star session.  Preserve every survivor's
+            // interpolation, proxy and queued state.
+            g_peersPresent.erase(*it);
+            g_repl.clearOwnerReplicationState(gw, *it);
+            g_inbound.discardOwner(*it);
         }
-    }
-    // Phase 2 crash hardening: a peer drop leaves this side's minted proxies
-    // standing AND its drive maps pointing at bodies with no fresh authority
-    // (the engine will eventually reap them, and the next drive touches a freed
-    // pointer - the "join crash -> host follow-on crash" chain). Despawn the
-    // minted proxies and clear the peer maps, mirroring coopUiDisconnect(). Runs
-    // once per leave batch (we support a single peer).
-    if (!leaves.empty()) {
-        g_repl.clearPeerReplicationState(gw);
-        g_inbound.flushWorldState();
+        g_peerPresent = !g_peersPresent.empty();
     }
 }
 
@@ -1343,7 +1346,12 @@ void tickReplicateApply(GameWorld* gw, bool worldLive) {
         // authors the cells it stands in and judges its local copies of the
         // other's. With cellAuth off the two conditions collapse to today's
         // exclusive split, which is what makes the fail-open A/B meaningful.
-        if (!g_cfg.isHost || g_cfg.cellAuth) {
+        // A disconnected join has no remote world authority. In that state it
+        // must immediately behave as a normal solo game instead of judging an
+        // empty remote stream and suppressing native NPCs. Hosts retain their
+        // optional cell-authority pass because their local world stays primary.
+        if ((g_cfg.isHost && g_cfg.cellAuth) ||
+            (!g_cfg.isHost && g_peerPresent)) {
             g_repl.applyNpcCensus(gw, g_inbound);
             g_repl.enforceHostAuthority(gw, g_net.localId());
         }
@@ -1766,6 +1774,10 @@ void titleUpdate_hook(TitleScreen* self) {
 }
 
 void startNetworking() {
+    if (!g_net.setSessionConfig(g_cfg.maxPlayers, g_cfg.ownRanks)) {
+        coopErr("KenshiCoop: invalid N-player session configuration");
+        return;
+    }
     // Debug WAN simulation: when configured, hold/drop inbound entity batches so the
     // loopback harness exercises the real-latency path (interp + local enforcement)
     // instead of the ~0 ms same-frame delivery we'd otherwise validate against.

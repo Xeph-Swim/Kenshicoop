@@ -370,6 +370,7 @@ struct InboundCellClaim {
 // clear (flush) - so the push/drain methods below are unchanged.
 struct IClearableQueue {
     virtual void clearQueue() = 0;
+    virtual void eraseOwner(u32 ownerId) = 0;
     virtual ~IClearableQueue() {}
 };
 
@@ -390,6 +391,12 @@ public:
     }
     operator std::deque<T>&() { return q_; }
     virtual void clearQueue() { q_.clear(); }
+    virtual void eraseOwner(u32 ownerId) {
+        for (typename std::deque<T>::iterator it = q_.begin(); it != q_.end(); ) {
+            if (it->ownerId == ownerId) it = q_.erase(it);
+            else ++it;
+        }
+    }
 private:
     std::deque<T> q_;
     size_t        cap_;
@@ -403,6 +410,12 @@ public:
     SessionQ() {}
     void push_back(const T& v) { q_.push_back(v); }
     operator std::deque<T>&() { return q_; }
+    void eraseOwner(u32 ownerId) {
+        for (typename std::deque<T>::iterator it = q_.begin(); it != q_.end(); ) {
+            if (it->ownerId == ownerId) it = q_.erase(it);
+            else ++it;
+        }
+    }
 private:
     std::deque<T> q_;
     SessionQ(const SessionQ&);
@@ -848,6 +861,24 @@ public:
         // spawn) or a scenario may arm again.
         sawRemote_ = false;
         ++generation_;
+        LeaveCriticalSection(&cs_);
+    }
+
+    // A single participant left while the session remains live.  Remove only
+    // packets authored by that owner; packets from surviving peers must remain
+    // queued for the game thread.  Presence edges are deliberately untouched.
+    void discardOwner(u32 ownerId) {
+        EnterCriticalSection(&cs_);
+        for (size_t i = 0; i < worldReset_.size(); ++i)
+            worldReset_[i]->eraseOwner(ownerId);
+        saveReq_.eraseOwner(ownerId);
+        saveBegin_.eraseOwner(ownerId);
+        saveFile_.eraseOwner(ownerId);
+        saveDone_.eraseOwner(ownerId);
+        saveAck_.eraseOwner(ownerId);
+        loadGo_.eraseOwner(ownerId);
+        loadReq_.eraseOwner(ownerId);
+        loadNack_.eraseOwner(ownerId);
         LeaveCriticalSection(&cs_);
     }
 

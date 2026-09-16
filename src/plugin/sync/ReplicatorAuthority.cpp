@@ -163,6 +163,21 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
     for (std::map<Key, Driven>::iterator it = targets_.begin(); it != targets_.end(); ++it) {
         if (it->second.fresh) keep.insert(it->first);
     }
+    // A save-native body may resolve from the peer's wire hand and then report a
+    // different local hand after Kenshi re-containers it. Mid-band samples have
+    // intentional gaps, so carry the same eight-second recently-driven grace to
+    // that translated local key. Otherwise the wide pass sees the local alias as
+    // absent, hides it, and the next stream sample immediately restores it.
+    {
+        const unsigned long keepNow = nowMs();
+        for (std::map<Key, Key>::const_iterator ri = rekeyLogged_.begin();
+             ri != rekeyLogged_.end(); ++ri) {
+            std::map<Key, Driven>::const_iterator ti = targets_.find(ri->first);
+            if (ti != targets_.end() && ti->second.lastSeenMs != 0 &&
+                (keepNow - ti->second.lastSeenMs) < 8000)
+                keep.insert(ri->second);
+        }
+    }
 
     // Proxy bodies are EXEMPT from authority judgment (2026-07-11 census-mint
     // fix): a proxy's LOCAL hand never matches its streamed key, so the wide
@@ -493,7 +508,13 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
             // body's samples ride the round-robin, and a rotation hiccup
             // must not let the cull streak run while the body is between
             // samples (run 103044: 6 cull/restore cycles per hand).
-            bool driven = drivenChars_.find(wChars[i]) != drivenChars_.end();
+            // Adopted proxy bindings are keyed by the peer's wire hand, while
+            // this wide enumeration yields the body's local hand. Pointer
+            // identity is therefore the reliable exemption here, just as it is
+            // in the near pass above. Omitting proxyChars made an adopted body
+            // alternate between wide cull and proxy restore every second.
+            bool driven = proxyChars.find(wChars[i]) != proxyChars.end() ||
+                          drivenChars_.find(wChars[i]) != drivenChars_.end();
             if (!driven) {
                 std::map<Character*, unsigned long>::iterator ds =
                     drivenSeen_.find(wChars[i]);

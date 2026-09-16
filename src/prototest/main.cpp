@@ -28,6 +28,7 @@
 #include "../plugin/sync/Interp.h"
 #include "../plugin/core/OwnRanks.h"
 #include "../plugin/core/SessionRegistry.h"
+#include "../plugin/core/SessionProtocol.h"
 #include "../plugin/core/SteamId.h"
 #include "../plugin/core/WorkPose.h"
 #include "../plugin/core/DeathLatch.h"
@@ -73,8 +74,10 @@ static int g_total  = 0;
 
 static void testSizes() {
     std::printf("== wire struct sizes (the packed contract both clients memcpy) ==\n");
-    CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             4);
+    CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             6);
     CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),           7);
+    CHECK_EQ("sizeof(PeerStatusPacket)",        sizeof(PeerStatusPacket),        8);
+    CHECK_EQ("sizeof(RejectPacket)",            sizeof(RejectPacket),            4);
     CHECK_EQ("sizeof(EventPacket)",             sizeof(EventPacket),             54);
     CHECK_EQ("sizeof(EntityState)",             sizeof(EntityState),             79);
     CHECK_EQ("sizeof(EntityBatchHeader)",       sizeof(EntityBatchHeader),       14); // v35: +sendMs; v44: +epoch
@@ -311,8 +314,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v55: runtime-fixture identity)",
-             (int)PROTOCOL_VERSION, 55);
+    CHECK_EQ("PROTOCOL_VERSION (v56: N-player admission/roster)",
+             (int)PROTOCOL_VERSION, 56);
 
     // Protocol 52: the shared money pool. The two players spend from ONE wallet,
     // so the join reports CHANGES and the host the authoritative TOTAL - swap
@@ -464,6 +467,8 @@ static void testRoundTrips() {
     std::printf("== readPacket round-trips + truncation rejection ==\n");
     roundTrip<HelloPacket>("HelloPacket", (u8)PKT_HELLO);
     roundTrip<WelcomePacket>("WelcomePacket", (u8)PKT_WELCOME);
+    roundTrip<PeerStatusPacket>("PeerStatusPacket", (u8)PKT_PEER_STATUS);
+    roundTrip<RejectPacket>("RejectPacket", (u8)PKT_REJECT);
     roundTrip<EventPacket>("EventPacket", (u8)PKT_EVENT);
     roundTrip<WorldDropPacket>("WorldDropPacket", (u8)PKT_WORLD_DROP);
     roundTrip<WorldPickupPacket>("WorldPickupPacket", (u8)PKT_WORLD_PICKUP);
@@ -510,16 +515,17 @@ static void testRoundTrips() {
 static void testFraming() {
     std::printf("== field offsets + batch framing ==\n");
 
-    // HELLO: [u8 type][u16 version][u8 nameLen] - the version check that rejects
-    // mismatched builds depends on this exact layout.
-    unsigned char hello[4];
+    // HELLO header: [u8 type][u16 version][u16 claimCount][u8 nameLen].
+    unsigned char hello[6];
     hello[0] = (unsigned char)PKT_HELLO;
     hello[1] = (unsigned char)(PROTOCOL_VERSION & 0xFF);
     hello[2] = (unsigned char)((PROTOCOL_VERSION >> 8) & 0xFF);
-    hello[3] = 0;
+    hello[3] = 1; hello[4] = 0;
+    hello[5] = 0;
     HelloPacket h;
-    CHECK("HELLO parses from raw bytes", readPacket(hello, 4, &h));
+    CHECK("HELLO header parses from raw bytes", readPacket(hello, 6, &h));
     CHECK_EQ("HELLO version field offset", h.version, PROTOCOL_VERSION);
+    CHECK_EQ("HELLO claim-count field offset", h.claimCount, 1);
     CHECK("HELLO version mismatch detectable", ((u16)(PROTOCOL_VERSION + 1)) != h.version);
 
     // Entity batch framing: [EntityBatchHeader][EntityState*count], the exact
@@ -1771,6 +1777,31 @@ static SessionRegistry::SquadClaims claim(u32 rank) {
     SessionRegistry::SquadClaims ranks; ranks.insert(rank); return ranks;
 }
 
+static void testInboundOwnerDiscard() {
+    std::printf("== owner-isolated inbound cleanup (Inbound.h) ==\n");
+    Inbound in;
+
+    EventPacket ev; std::memset(&ev, 0, sizeof(ev)); ev.type = (u8)PKT_EVENT;
+    ev.ownerId = 1; in.pushEvent(1, ev);
+    ev.ownerId = 2; in.pushEvent(2, ev);
+
+    SaveReqPacket sr; std::memset(&sr, 0, sizeof(sr)); sr.type = (u8)PKT_SAVE_REQ;
+    sr.ownerId = 1; in.pushSaveReq(1, sr);
+    sr.ownerId = 2; in.pushSaveReq(2, sr);
+    in.pushLeave(1);
+
+    in.discardOwner(1);
+
+    std::deque<InboundEvent> events; in.drainEvents(events);
+    CHECK("departed owner's world packets removed", events.size() == 1);
+    CHECK_EQ("survivor's world packet preserved", events.front().ownerId, 2);
+    std::deque<InboundSaveReq> saves; in.drainSaveReqs(saves);
+    CHECK("departed owner's session packets removed", saves.size() == 1);
+    CHECK_EQ("survivor's session packet preserved", saves.front().ownerId, 2);
+    std::deque<u32> leaves; in.drainLeaves(leaves);
+    CHECK("presence edges survive owner discard", leaves.size() == 1 && leaves.front() == 1);
+}
+
 static void testSessionRegistry() {
     std::printf("\n== N-player admission policy (no live clients) ==\n");
     for (u32 count = 2; count <= 4; ++count) {
@@ -1840,6 +1871,122 @@ static void testSessionRegistry() {
     CHECK_EQ("second departed claim released", churn.squadOwner(1000), OWNER_ID_ALL);
 }
 
+static void testSessionProtocol() {
+    std::printf("\n== N-player handshake and star routing policy ==\n");
+    std::set<u32> claims;
+    claims.insert(2); claims.insert(7); claims.insert(99);
+    std::vector<u8> wire;
+    CHECK("encode multi-squad HELLO", encodeHello(claims, "join-a", wire));
+    CHECK_EQ("HELLO variable size",
+             wire.size(), sizeof(HelloPacket) + 3 * sizeof(u32) + 6);
+
+    u16 version = 0;
+    std::set<u32> decoded;
+    std::string name;
+    CHECK("decode multi-squad HELLO",
+          decodeHello(&wire[0], (unsigned)wire.size(), version, decoded, name));
+    CHECK_EQ("HELLO version round trip", version, PROTOCOL_VERSION);
+    CHECK("HELLO claims round trip", decoded == claims);
+    CHECK("HELLO name round trip", name == "join-a");
+    CHECK("HELLO rejects truncation",
+          !decodeHello(&wire[0], (unsigned)wire.size() - 1, version, decoded, name));
+    wire.push_back(0);
+    CHECK("HELLO rejects trailing bytes",
+          !decodeHello(&wire[0], (unsigned)wire.size(), version, decoded, name));
+    wire.pop_back();
+
+    // Duplicate claims are malformed even though the decoded representation is a set.
+    std::vector<u8> duplicate(sizeof(HelloPacket) + 2 * sizeof(u32));
+    HelloPacket dh;
+    dh.type = (u8)PKT_HELLO; dh.version = PROTOCOL_VERSION;
+    dh.claimCount = 2; dh.nameLen = 0;
+    std::memcpy(&duplicate[0], &dh, sizeof(dh));
+    u32 duplicateRank = 5;
+    std::memcpy(&duplicate[sizeof(dh)], &duplicateRank, sizeof(duplicateRank));
+    std::memcpy(&duplicate[sizeof(dh) + sizeof(u32)], &duplicateRank, sizeof(duplicateRank));
+    CHECK("HELLO rejects duplicate claims",
+          !decodeHello(&duplicate[0], (unsigned)duplicate.size(), version, decoded, name));
+    duplicateRank = OWNER_ID_ALL;
+    std::memcpy(&duplicate[sizeof(dh)], &duplicateRank, sizeof(duplicateRank));
+    CHECK("HELLO rejects reserved squad claim",
+          !decodeHello(&duplicate[0], (unsigned)duplicate.size(), version, decoded, name));
+    std::set<u32> noClaims;
+    CHECK("HELLO encoder rejects empty claims", !encodeHello(noClaims, "", wire));
+    CHECK("HELLO encoder rejects overlong name",
+          !encodeHello(claims, std::string(MAX_PEER_NAME + 1, 'x'), wire));
+
+    CHECK("encode present roster row", encodePeerStatus(true, 70, claims, wire));
+    bool present = false;
+    u32 owner = OWNER_ID_ALL;
+    CHECK("decode present roster row",
+          decodePeerStatus(&wire[0], (unsigned)wire.size(), present, owner, decoded));
+    CHECK("roster row preserves presence", present);
+    CHECK_EQ("roster row preserves wide owner ID", owner, 70);
+    CHECK("roster row preserves all claims", decoded == claims);
+    CHECK("encode departure roster row", encodePeerStatus(false, 70, claims, wire));
+    CHECK("decode departure roster row",
+          decodePeerStatus(&wire[0], (unsigned)wire.size(), present, owner, decoded) && !present);
+    wire.push_back(0);
+    CHECK("roster rejects trailing bytes",
+          !decodePeerStatus(&wire[0], (unsigned)wire.size(), present, owner, decoded));
+
+    CHECK("entity state is explicitly relayed", packetRelayedByHost(PKT_ENTITY_BATCH));
+    CHECK("inventory state is explicitly relayed", packetRelayedByHost(PKT_INV_SNAPSHOT));
+    CHECK("cell-authority census is explicitly relayed", packetRelayedByHost(PKT_NPC_CENSUS));
+    CHECK("owner-directed stealth feedback is explicitly relayed", packetRelayedByHost(PKT_STEALTH));
+    CHECK("combat hit remains host-directed intent", !packetRelayedByHost(PKT_COMBAT_HIT));
+    CHECK("money delta remains host-directed intent", !packetRelayedByHost(PKT_MONEY_DELTA));
+    CHECK("save request remains host-directed intent", !packetRelayedByHost(PKT_SAVE_REQ));
+    CHECK("join clock report remains host-directed telemetry", !packetRelayedByHost(PKT_TIME));
+    CHECK("join may report its clock to host", packetAllowedFromClient(PKT_TIME));
+    CHECK("host may publish its clock to joins", packetAllowedFromHost(PKT_TIME));
+    CHECK("client cannot author host money total", !packetAllowedFromClient(PKT_MONEY));
+    CHECK("client can author its entity state", packetAllowedFromClient(PKT_ENTITY_BATCH));
+    CHECK("join accepts relayed entity state", packetAllowedFromHost(PKT_ENTITY_BATCH));
+    CHECK("join rejects client-only speed request", !packetAllowedFromHost(PKT_SPEED_REQ));
+    CHECK("unknown packet has no policy", packetPolicy(250) == POLICY_INVALID);
+
+    EventPacket eventPacket;
+    std::memset(&eventPacket, 0, sizeof(eventPacket));
+    eventPacket.type = (u8)PKT_EVENT; eventPacket.ownerId = 0x10203040u;
+    owner = 0;
+    CHECK("owner extracted without alignment assumptions",
+          readPacketOwner(&eventPacket, sizeof(eventPacket), owner));
+    CHECK_EQ("owner extraction preserves u32 range", owner, 0x10203040u);
+    CHECK("owner extraction rejects truncation",
+          !readPacketOwner(&eventPacket, 4, owner));
+    CHECK("handshake packet is not owner-tagged",
+          !readPacketOwner(&wire[0], (unsigned)wire.size(), owner));
+    CHECK("clock ping is connection-authenticated, not owner-tagged",
+          !packetHasOwner(PKT_TIME_PING));
+    CHECK("clock pong is connection-authenticated, not owner-tagged",
+          !packetHasOwner(PKT_TIME_PONG));
+
+    EntityBatchHeader batch;
+    std::memset(&batch, 0, sizeof(batch));
+    batch.type = (u8)PKT_ENTITY_BATCH; batch.ownerId = 7; batch.count = 2;
+    std::vector<u8> batchBytes(sizeof(batch) + 2 * sizeof(EntityState));
+    std::memcpy(&batchBytes[0], &batch, sizeof(batch));
+    CHECK("relay framing accepts exact entity batch",
+          gameplayPacketFramingValid(PKT_ENTITY_BATCH, &batchBytes[0],
+                                     (unsigned)batchBytes.size()));
+    CHECK("relay framing rejects truncated entity batch",
+          !gameplayPacketFramingValid(PKT_ENTITY_BATCH, &batchBytes[0],
+                                      (unsigned)batchBytes.size() - 1));
+    batchBytes.push_back(0);
+    CHECK("relay framing rejects padded entity batch",
+          !gameplayPacketFramingValid(PKT_ENTITY_BATCH, &batchBytes[0],
+                                      (unsigned)batchBytes.size()));
+    CHECK("relay framing rejects wrong fixed packet size",
+          !gameplayPacketFramingValid(PKT_EVENT, &eventPacket,
+                                      sizeof(eventPacket) - 1));
+
+    CHECK_EQ("invalid claims map to rejection", rejectionForAdmission(SessionRegistry::INVALID_CLAIMS), REJECT_INVALID_CLAIMS);
+    CHECK_EQ("duplicate claim maps to rejection", rejectionForAdmission(SessionRegistry::CLAIM_TAKEN), REJECT_CLAIM_TAKEN);
+    CHECK_EQ("session full maps to rejection", rejectionForAdmission(SessionRegistry::SESSION_FULL), REJECT_SESSION_FULL);
+    CHECK_EQ("ID exhaustion maps to rejection", rejectionForAdmission(SessionRegistry::IDS_EXHAUSTED), REJECT_IDS_EXHAUSTED);
+}
+
 int main() {
     std::printf("prototest: KenshiCoop wire/hash/interp unit layer (protocol v%u)\n",
                 (unsigned)PROTOCOL_VERSION);
@@ -1857,11 +2004,13 @@ int main() {
     testInterp();
     testOwnRanks();
     testSessionRegistry();
+    testSessionProtocol();
     testSteamIdParse();
     testWorkPoseMatch();
     testTaskClear();
     testDeathRekey();
     testInboundLifecycle();
+    testInboundOwnerDiscard();
     testFlushWorldStateContract();
     testTeardownOrdering();
     std::printf("\nprototest: %d/%d checks passed%s\n",

@@ -669,6 +669,9 @@ public:
     // to clear the maps that referenced them. Safe if reconnect follows: the new
     // session re-censuses and re-mints from scratch.
     void clearPeerReplicationState(GameWorld* gw);
+    // Remove only state authored by one departed participant.  OWNER_ID_ALL
+    // retains the full-session teardown used when a join loses its host.
+    void clearOwnerReplicationState(GameWorld* gw, u32 ownerId);
 
     // AFTER engine: sample + apply the interpolated pose for every tracked entity.
     void applyTargets(GameWorld* gw);
@@ -805,6 +808,7 @@ private:
 
     struct Driven {
         EntityInterp interp;
+        u32          owner;          // owner whose stream last drove this hand
         bool         fresh;          // host streamed a non-stale sample this tick
         bool         haveActual;     // lx/ly/lz hold a valid previous actual pos
         float        lx, ly, lz;     // last actual (rendered) position
@@ -942,7 +946,7 @@ private:
         // accrued under sparse mid coverage - classed to the mid ledger
         // (like young-ring coverage snaps), not steady-state near tracking.
         unsigned long midSeenMs;
-        Driven() : fresh(false), haveActual(false), lx(0), ly(0), lz(0), parked(false),
+        Driven() : owner(OWNER_ID_ALL), fresh(false), haveActual(false), lx(0), ly(0), lz(0), parked(false),
                    haveDest(false), dx(0), dy(0), dz(0), walkHalted(false), walkStallF(0),
                    suppressed(false), lastSeenMs(0),
                    issuedTask(TASK_NONE), taskApplied(false), taskBad(false),

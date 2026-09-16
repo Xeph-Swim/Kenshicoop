@@ -92,9 +92,34 @@ if (-not $oracleOk) { $overall = $false }
 
 # ---- summary -------------------------------------------------------------------
 Write-Host ""
+Write-Host "############################################################"
+Write-Host "# verify: N-player NetLink loopback integration"
+Write-Host "############################################################"
+$sessionTest = Join-Path $repoRoot "dist\sessiontest.exe"
+if (-not $SkipBuild) {
+    & cmd.exe /c "`"$scriptDir\build_sessiontest.cmd`""
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "SESSION INTEGRATION: FAIL (build exit $LASTEXITCODE)"
+        $sessionOk = $false
+    }
+}
+if ($null -eq $sessionOk) {
+    if (Test-Path $sessionTest) {
+        & $sessionTest
+        $sessionOk = ($LASTEXITCODE -eq 0)
+    } else {
+        $sessionOk = $false
+    }
+}
+Write-Host ("SESSION INTEGRATION: " + $(if ($sessionOk) { "PASS" } else { "FAIL" }))
+if (-not $sessionOk) { $overall = $false }
+
+# ---- summary -------------------------------------------------------------------
+Write-Host ""
 Write-Host "================= VERIFY SUMMARY ================="
 Write-Host ("  unit layer (prototest):   " + $(if ($unitOk) { "PASS" } else { "FAIL" }))
 Write-Host ("  contract fixtures:        " + $(if ($fixOk)  { "PASS" } else { "FAIL" }))
 Write-Host ("  oracle fixtures:          " + $(if ($oracleOk) { "PASS" } else { "FAIL" }))
+Write-Host ("  session integration:      " + $(if ($sessionOk) { "PASS" } else { "FAIL" }))
 Write-Host ("OVERALL: " + $(if ($overall) { "PASS" } else { "FAIL" }))
 if ($overall) { exit 0 } else { exit 1 }

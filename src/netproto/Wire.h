@@ -21,11 +21,11 @@ typedef float          f32;
 typedef double         f64;
 
 // Protocol version. The full version-by-version history (what each bump added
-// and why) lives in resources/PROTOCOL_HISTORY.md - keep it there, not here, so
+// and why) lives in docs/PROTOCOL_HISTORY.md - keep it there, not here, so
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 55;
+const u16 PROTOCOL_VERSION = 56;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -76,7 +76,9 @@ enum PacketType {
     PKT_INV_XFER_ACK     = 45,// RELIABLE transfer verdict (protocol 50); InvXferAckPacket
     PKT_MONEY_DELTA      = 46,// RELIABLE join money-pool delta (join -> host, protocol 52); MoneyDeltaPacket
     PKT_DEED             = 47,// RELIABLE property-ownership row (protocol 54); DeedPacket
-    PKT_FIXTURE          = 48 // RELIABLE runtime-fixture identity row (protocol 55); FixturePacket
+    PKT_FIXTURE          = 48,// RELIABLE runtime-fixture identity row (protocol 55); FixturePacket
+    PKT_PEER_STATUS      = 49,// host -> joins: dynamic owner/squad roster row (protocol 56)
+    PKT_REJECT           = 50 // host -> rejected join: explicit admission failure (protocol 56)
 };
 
 // One-shot transition events carried on the RELIABLE channel. Continuous state
@@ -131,16 +133,41 @@ const u32 OWNER_ID_ALL = 0xFFFFFFFFu;
 #pragma pack(push, 1)
 
 struct HelloPacket {
-    u8  type;    // = PKT_HELLO
-    u16 version; // = PROTOCOL_VERSION
-    u8  nameLen; // bytes of name following this struct (0..63)
-    // char name[nameLen] follows
+    u8  type;       // = PKT_HELLO
+    u16 version;    // = PROTOCOL_VERSION
+    u16 claimCount; // u32 squad ranks following this struct
+    u8  nameLen;    // name bytes following the claims (0..63)
+    // u32 squadClaims[claimCount], char name[nameLen] follow
 };
 
 struct WelcomePacket {
     u8  type;     // = PKT_WELCOME
     u16 version;  // host's PROTOCOL_VERSION (client re-checks)
     u32 playerId; // id the host assigned to this client
+};
+
+struct PeerStatusPacket {
+    u8  type;       // = PKT_PEER_STATUS
+    u8  present;    // 1 = admitted/current, 0 = departed
+    u32 ownerId;    // stable session owner identity
+    u16 claimCount; // u32 squad ranks following this struct
+    // u32 squadClaims[claimCount] follow
+};
+
+enum RejectReason {
+    REJECT_PROTOCOL_MISMATCH = 1,
+    REJECT_INVALID_CLAIMS    = 2,
+    REJECT_CLAIM_TAKEN       = 3,
+    REJECT_SESSION_FULL      = 4,
+    REJECT_IDS_EXHAUSTED     = 5,
+    REJECT_ALREADY_ADMITTED  = 6,
+    REJECT_UNAUTHORIZED      = 7
+};
+
+struct RejectPacket {
+    u8  type;    // = PKT_REJECT
+    u16 version; // host's protocol version
+    u8  reason;  // RejectReason
 };
 
 // A reliable one-shot transition. 'subject' is the hand the event happened TO; the

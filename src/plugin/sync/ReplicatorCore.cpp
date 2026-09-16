@@ -349,6 +349,21 @@ void Replicator::clearPeerReplicationState(GameWorld* gw) {
     // adopted is one this client generated itself, so the peer leaving makes it
     // ours again rather than making it garbage. Destroying them here would empty a
     // whole town on disconnect, and bake that emptiness into the next save.
+    // A join can have hidden save-native NPCs that the host proved absent.
+    // Once the host link is gone there is no remote authority left to justify
+    // keeping those local bodies hidden. Restore them before dropping the map;
+    // otherwise they remain culled and the authority pass can suppress them a
+    // second time while the join is returning to solo play.
+    unsigned int restored = 0;
+    if (gw) {
+        for (std::map<Key, Character*>::iterator si = suppressed_.begin();
+             si != suppressed_.end(); ++si) {
+            if (!si->second) continue;
+            engine::restoreNpc(gw, si->second);
+            ++restored;
+        }
+    }
+
     unsigned int cleared = 0, released = 0;
     for (std::map<Key, Character*>::iterator it = proxyByKey_.begin();
          it != proxyByKey_.end(); ++it) {
@@ -356,9 +371,10 @@ void Replicator::clearPeerReplicationState(GameWorld* gw) {
         if (destroyIfMinted(gw, it->second)) ++cleared; else ++released;
     }
     mintedBodies_.clear();
-    char b[128];
-    _snprintf(b, sizeof(b) - 1, "[leave] cleared proxies=%u released=%u",
-              cleared, released);
+    char b[160];
+    _snprintf(b, sizeof(b) - 1,
+              "[leave] cleared proxies=%u released=%u restored=%u",
+              cleared, released, restored);
     b[sizeof(b) - 1] = '\0';
     coop::logLine(b);
     // World-item proxies (Phase 3): the world stays LIVE across a peer leave /
@@ -382,6 +398,84 @@ void Replicator::clearPeerReplicationState(GameWorld* gw) {
     coop::logLine(b);
     // Now drop every map (proxyByKey_ included) back to freshly-launched state.
     resetSession();
+}
+
+void Replicator::clearOwnerReplicationState(GameWorld* gw, u32 ownerId) {
+    if (ownerId == OWNER_ID_ALL) {
+        clearPeerReplicationState(gw);
+        return;
+    }
+
+    // Capture the exact hands fed by the departing owner before erasing their
+    // interpolation records.  Save-native adopted bodies are released; only
+    // bodies that this plugin minted are destroyed.
+    std::set<Key> ownerHands;
+    for (std::map<Key, Driven>::iterator ti = targets_.begin();
+         ti != targets_.end(); ++ti) {
+        if (ti->second.owner == ownerId) ownerHands.insert(ti->first);
+    }
+
+    unsigned int cleared = 0, released = 0, undriven = 0;
+    for (std::set<Key>::const_iterator ki = ownerHands.begin();
+         ki != ownerHands.end(); ++ki) {
+        std::map<Key, Character*>::iterator px = proxyByKey_.find(*ki);
+        if (px != proxyByKey_.end()) {
+            Character* body = px->second;
+            if (gw && body) {
+                if (destroyIfMinted(gw, body)) ++cleared;
+                else ++released;
+            }
+            mintedBodies_.erase(body);
+            drivenChars_.erase(body);
+            drivenSeen_.erase(body);
+            canonicalOf_.erase(body);
+            proxyByKey_.erase(px);
+        }
+        pinPeer_.erase(*ki);
+        suppressed_.erase(*ki);
+        life_.erase(*ki);
+        censusHands_.erase(*ki);
+        censusPos_.erase(*ki);
+        parkMs_.erase(*ki);
+        targets_.erase(*ki);
+        ++undriven;
+    }
+
+    unsigned int wcleared = 0, wstale = 0;
+    for (std::map<std::pair<u32, u32>, WorldProxy>::iterator wi = worldProxies_.begin();
+         wi != worldProxies_.end(); ) {
+        if (wi->first.first != ownerId) { ++wi; continue; }
+        RootObject* live = gw ? liveWorldProxy(wi->second) : 0;
+        if (!live) ++wstale;
+        else if (engine::removeWorldItemProxy(gw, live)) ++wcleared;
+        worldProxies_.erase(wi++);
+    }
+
+    for (std::map<Key, InvRecv>::iterator ii = invRecv_.begin();
+         ii != invRecv_.end(); ) {
+        if (ii->second.ownerId == ownerId) invRecv_.erase(ii++);
+        else ++ii;
+    }
+    peerClock_.erase(ownerId);
+    for (std::set<std::pair<u32, u32> >::iterator di = appliedDrops_.begin();
+         di != appliedDrops_.end(); ) {
+        if (di->first == ownerId) appliedDrops_.erase(di++); else ++di;
+    }
+    for (std::set<std::pair<u32, u32> >::iterator pi = appliedPickups_.begin();
+         pi != appliedPickups_.end(); ) {
+        if (pi->first == ownerId) appliedPickups_.erase(pi++); else ++pi;
+    }
+    for (std::set<std::pair<u32, u32> >::iterator xi = appliedXfers_.begin();
+         xi != appliedXfers_.end(); ) {
+        if (xi->first == ownerId) appliedXfers_.erase(xi++); else ++xi;
+    }
+
+    char b[176];
+    _snprintf(b, sizeof(b) - 1,
+              "[leave] owner=%u cleared: driven=%u proxies=%u released=%u worldProxies=%u stale=%u",
+              (unsigned)ownerId, undriven, cleared, released, wcleared, wstale);
+    b[sizeof(b) - 1] = '\0';
+    coop::logLine(b);
 }
 
 void Replicator::ingest(Inbound& in) {
@@ -414,6 +508,7 @@ void Replicator::ingest(Inbound& in) {
             if ((long)(t - now) > 0) t = now;
         }
         Driven& d = targets_[keyOf(it->e)];
+        d.owner = it->ownerId;
         d.interp.push(it->e, t, now);
         d.lastSeenMs = now;
     }

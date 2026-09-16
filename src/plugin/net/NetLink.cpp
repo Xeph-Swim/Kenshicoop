@@ -80,11 +80,13 @@ void pushLocked(CRITICAL_SECTION& cs, std::vector<T>& q, const T& v) {
 NetLink::NetLink()
     : isHost_(false), port_(0),
       enetHost_(0), serverPeer_(0), inbound_(0),
+      maxPlayers_(SessionRegistry::DEFAULT_MAX_PLAYERS),
       outOwner_(0), outStampMs_(0), haveOut_(false),
       thread_(0), running_(0), stopFlag_(0), myId_(0),
       sendEpoch_(0),
       steamPeer_(0),
       simDelayMs_(0), simJitterMs_(0), simLossPct_(0) {
+    localClaims_.insert(0);
     InitializeCriticalSection(&outCs_);
 }
 
@@ -95,12 +97,29 @@ NetLink::~NetLink() {
 
 bool NetLink::startHost(int port, Inbound* inbound) {
     isHost_ = true; port_ = port; inbound_ = inbound; myId_ = 0;
+    session_ = SessionRegistry();
+    if (!session_.configure(maxPlayers_, localClaims_)) {
+        netErr("invalid host session configuration");
+        return false;
+    }
+    peersById_.clear();
+    activeOwners_.clear();
     return launchThread();
 }
 
 bool NetLink::startClient(const std::string& ip, int port, Inbound* inbound) {
     isHost_ = false; ip_ = ip; port_ = port; inbound_ = inbound; myId_ = 0;
+    activeOwners_.clear();
     return launchThread();
+}
+
+bool NetLink::setSessionConfig(unsigned int maxPlayers,
+                               const std::set<unsigned int>& localClaims) {
+    if (thread_ || maxPlayers < 2 || maxPlayers > 4095 || !validClaims(localClaims))
+        return false;
+    maxPlayers_ = maxPlayers;
+    localClaims_ = localClaims;
+    return true;
 }
 
 bool NetLink::launchThread() {
@@ -319,6 +338,98 @@ bool NetLink::acceptEpoch(u32 ownerId, u32 epoch) {
     return true;
 }
 
+void NetLink::relayToOthers(ENetPeer* from, enet_uint8 channel,
+                            const ENetPacket* packet) {
+    if (!packet || peersById_.size() < 2) return;
+    const enet_uint32 flags = packet->flags &
+        (ENET_PACKET_FLAG_RELIABLE | ENET_PACKET_FLAG_UNSEQUENCED);
+    ENetPacket* copy = enet_packet_create(packet->data, packet->dataLength, flags);
+    if (!copy) return;
+    for (std::map<u32, ENetPeer*>::iterator i = peersById_.begin();
+         i != peersById_.end(); ++i) {
+        if (i->second == from || i->second->state != ENET_PEER_STATE_CONNECTED) continue;
+        enet_peer_send(i->second, channel, copy);
+    }
+    if (copy->referenceCount == 0) enet_packet_destroy(copy);
+}
+
+void NetLink::broadcastToAdmitted(enet_uint8 channel, ENetPacket* packet) {
+    if (!packet) return;
+    for (std::map<u32, ENetPeer*>::iterator i = peersById_.begin();
+         i != peersById_.end(); ++i) {
+        if (i->second->state == ENET_PEER_STATE_CONNECTED)
+            enet_peer_send(i->second, channel, packet);
+    }
+    if (packet->referenceCount == 0) enet_packet_destroy(packet);
+}
+
+void NetLink::sendStatusTo(ENetPeer* to, u32 ownerId,
+                           const SessionRegistry::SquadClaims& claims, bool present) {
+    if (!to || to->state != ENET_PEER_STATE_CONNECTED) return;
+    std::vector<u8> bytes;
+    if (!encodePeerStatus(present, ownerId, claims, bytes)) return;
+    ENetPacket* packet = enet_packet_create(&bytes[0], bytes.size(),
+                                            ENET_PACKET_FLAG_RELIABLE);
+    if (packet) enet_peer_send(to, CH_RELIABLE, packet);
+}
+
+void NetLink::broadcastStatusExcept(u32 exceptId, u32 ownerId,
+                                    const SessionRegistry::SquadClaims& claims,
+                                    bool present) {
+    for (std::map<u32, ENetPeer*>::iterator i = peersById_.begin();
+         i != peersById_.end(); ++i) {
+        if (i->first != exceptId) sendStatusTo(i->second, ownerId, claims, present);
+    }
+}
+
+void NetLink::rejectPeer(ENetPeer* peer, u8 reason, const char* detail) {
+    if (!peer) return;
+    RejectPacket reject;
+    reject.type = (u8)PKT_REJECT;
+    reject.version = PROTOCOL_VERSION;
+    reject.reason = reason;
+    ENetPacket* packet = enet_packet_create(&reject, sizeof(reject),
+                                            ENET_PACKET_FLAG_RELIABLE);
+    if (packet) enet_peer_send(peer, CH_RELIABLE, packet);
+    netErr(detail ? detail : "peer admission rejected");
+    // Flush the reliable reason before closing the connection.
+    enet_peer_disconnect_later(peer, reason);
+}
+
+void NetLink::dropPeer(u32 ownerId, bool announce) {
+    const SessionRegistry::Owners& owners = session_.owners();
+    SessionRegistry::Owners::const_iterator found = owners.find(ownerId);
+    if (found == owners.end()) return;
+    const SessionRegistry::SquadClaims claims = found->second;
+    peersById_.erase(ownerId);
+    epochSeen_.erase(ownerId);
+    session_.remove(ownerId);
+    if (announce) broadcastStatusExcept(ownerId, ownerId, claims, false);
+    if (inbound_) inbound_->pushLeave(ownerId);
+    char message[80];
+    _snprintf(message, sizeof(message) - 1, "peer disconnected id=%u",
+              (unsigned)ownerId);
+    message[sizeof(message) - 1] = '\0';
+    netLog(message);
+}
+
+bool NetLink::acceptGameplayPacket(ENetPeer* from, u8 type,
+                                   const void* data, unsigned len) {
+    if (!gameplayPacketFramingValid(type, data, len)) return false;
+    if (isHost_) {
+        const u32 sender = from ? (u32)(size_t)from->data : 0;
+        if (sender == 0 || !session_.contains(sender) || !packetAllowedFromClient(type))
+            return false;
+        if (!packetHasOwner(type)) return type == PKT_TIME_PING;
+        u32 owner = OWNER_ID_ALL;
+        return readPacketOwner(data, len, owner) && owner == sender;
+    }
+    if (!packetAllowedFromHost(type)) return false;
+    if (!packetHasOwner(type)) return type == PKT_TIME_PONG;
+    u32 owner = OWNER_ID_ALL;
+    return readPacketOwner(data, len, owner) && activeOwners_.count(owner) != 0;
+}
+
 void NetLink::deliverEntity(u32 ownerId, u32 sendMs, const EntityState& e) {
     if (simDelayMs_ == 0 && simJitterMs_ == 0 && simLossPct_ == 0) {
         if (inbound_) inbound_->pushEntity(ownerId, sendMs, e);
@@ -376,7 +487,9 @@ void NetLink::threadLoop() {
         ENetAddress addr;
         addr.host = ENET_HOST_ANY;
         addr.port = (enet_uint16)port_;
-        enetHost_ = enet_host_create(&addr, 8 /*peers*/, CH_COUNT /*channels*/, 0, 0);
+        // Capacity counts the host. Reserve one extra transport slot so a full
+        // session can still return PKT_REJECT instead of failing silently in ENet.
+        enetHost_ = enet_host_create(&addr, maxPlayers_ /*remote slots incl. reject*/, CH_COUNT, 0, 0);
         if (!enetHost_) { netErr("host create failed"); InterlockedExchange(&running_, 0); return; }
         netLog("hosting");
     } else {
@@ -399,7 +512,6 @@ void NetLink::threadLoop() {
         if (serverPeer_) serverPeer_->mtu = 1200;
     }
 
-    u32   nextId = 1;
     DWORD lastConnectAttempt = GetTickCount();
 
     // Wall-clock time-sync state (client only). The join pings every ~2 s; each
@@ -448,59 +560,99 @@ void NetLink::threadLoop() {
                     // reconnecting peer may resume at a lower epoch than the one
                     // we last saw); forget prior per-owner epochs so the new
                     // session's first batch is never mistaken for stale (v44).
-                    epochSeen_.clear();
                     if (isHost_) {
                         // Wait for the client's HELLO before assigning an id, so
                         // a version mismatch is rejected before we admit it.
                         netLog("peer connecting (awaiting HELLO)");
                     } else {
+                        epochSeen_.clear();
+                        activeOwners_.clear();
                         // Introduce ourselves with our protocol version.
-                        HelloPacket h;
-                        h.type = (u8)PKT_HELLO; h.version = PROTOCOL_VERSION; h.nameLen = 0;
-                        ENetPacket* out = enet_packet_create(&h, sizeof(h), ENET_PACKET_FLAG_RELIABLE);
-                        enet_peer_send(ev.peer, CH_RELIABLE, out);
-                        netLog("connected to host; sent HELLO");
+                        std::vector<u8> hello;
+                        if (encodeHello(localClaims_, "", hello)) {
+                            ENetPacket* out = enet_packet_create(&hello[0], hello.size(),
+                                                                 ENET_PACKET_FLAG_RELIABLE);
+                            enet_peer_send(ev.peer, CH_RELIABLE, out);
+                            netLog("connected to host; sent HELLO with squad claims");
+                        } else {
+                            netErr("local squad claims cannot be encoded");
+                            enet_peer_disconnect(ev.peer, 0);
+                        }
                     }
                     break;
                 }
                 case ENET_EVENT_TYPE_RECEIVE: {
                     const u8 type = packetType(ev.packet->data, (unsigned)ev.packet->dataLength);
                     if (isHost_ && type == PKT_HELLO) {
-                        HelloPacket h;
-                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &h)) {
-                            if (h.version != PROTOCOL_VERSION) {
+                        if (ev.peer->data != 0) {
+                            rejectPeer(ev.peer, (u8)REJECT_ALREADY_ADMITTED,
+                                       "duplicate HELLO from admitted peer");
+                        } else {
+                            u16 version = 0;
+                            SessionRegistry::SquadClaims claims;
+                            std::string name;
+                            const unsigned helloLen = (unsigned)ev.packet->dataLength;
+                            if (helloLen >= 1 + sizeof(u16))
+                                std::memcpy(&version, ev.packet->data + 1, sizeof(version));
+                            if (helloLen >= 1 + sizeof(u16) && version != PROTOCOL_VERSION) {
                                 char b[128];
                                 _snprintf(b, sizeof(b) - 1,
                                           "protocol mismatch: peer v%u, ours v%u; rejecting",
-                                          (unsigned)h.version, (unsigned)PROTOCOL_VERSION);
+                                          (unsigned)version, (unsigned)PROTOCOL_VERSION);
                                 b[sizeof(b) - 1] = '\0';
-                                netErr(b);
-                                enet_peer_disconnect(ev.peer, 0);
+                                rejectPeer(ev.peer, (u8)REJECT_PROTOCOL_MISMATCH, b);
                             } else {
-                                u32 id = nextId++;
-                                // TWO-PLAYER ASSUMPTION (step-6 guard): the sync model
-                                // is host + ONE join. Join-authored events/inventory/
-                                // conservation intents reach only the host and are NOT
-                                // relayed to other joins, and OWNER_ID_ALL sweeps assume
-                                // a single peer. A third player connects at the wire
-                                // level but will silently desync - fail loudly instead.
-                                if (id >= 2) {
-                                    netErr("3+ players unsupported: join-authored state is "
-                                           "not relayed peer-to-peer; expect desync");
+                                const bool decoded = decodeHello(
+                                    ev.packet->data, helloLen, version, claims, name);
+                                if (!decoded) {
+                                    rejectPeer(ev.peer, (u8)REJECT_INVALID_CLAIMS,
+                                               "malformed HELLO or invalid squad claims");
+                                    enet_packet_destroy(ev.packet);
+                                    break;
                                 }
-                                ev.peer->data = (void*)(size_t)id;
-                                WelcomePacket w;
-                                w.type = (u8)PKT_WELCOME; w.version = PROTOCOL_VERSION; w.playerId = id;
-                                ENetPacket* out =
-                                    enet_packet_create(&w, sizeof(w), ENET_PACKET_FLAG_RELIABLE);
-                                enet_peer_send(ev.peer, CH_RELIABLE, out);
-                                char b[96];
-                                _snprintf(b, sizeof(b) - 1,
-                                          "peer connected id=%u (proto v%u)",
-                                          (unsigned)id, (unsigned)PROTOCOL_VERSION);
-                                b[sizeof(b) - 1] = '\0';
-                                netLog(b);
-                                if (inbound_) inbound_->pushConnect(id);
+                                u32 id = OWNER_ID_ALL;
+                                const SessionRegistry::Admission admission = session_.admit(claims, id);
+                                if (admission != SessionRegistry::ACCEPTED) {
+                                    char b[128];
+                                    _snprintf(b, sizeof(b) - 1,
+                                              "session admission rejected reason=%u players=%u/%u",
+                                              (unsigned)rejectionForAdmission(admission),
+                                              (unsigned)session_.owners().size(),
+                                              (unsigned)session_.maxPlayers());
+                                    b[sizeof(b) - 1] = '\0';
+                                    rejectPeer(ev.peer, rejectionForAdmission(admission), b);
+                                } else {
+                                    ev.peer->data = (void*)(size_t)id;
+                                    peersById_[id] = ev.peer;
+                                    WelcomePacket w;
+                                    w.type = (u8)PKT_WELCOME;
+                                    w.version = PROTOCOL_VERSION;
+                                    w.playerId = id;
+                                    ENetPacket* out = enet_packet_create(
+                                        &w, sizeof(w), ENET_PACKET_FLAG_RELIABLE);
+                                    enet_peer_send(ev.peer, CH_RELIABLE, out);
+
+                                    // The newcomer receives the complete current roster;
+                                    // established joins receive one admission edge.
+                                    const SessionRegistry::Owners& owners = session_.owners();
+                                    for (SessionRegistry::Owners::const_iterator i = owners.begin();
+                                         i != owners.end(); ++i) {
+                                        if (i->first != id)
+                                            sendStatusTo(ev.peer, i->first, i->second, true);
+                                    }
+                                    broadcastStatusExcept(id, id, claims, true);
+
+                                    char b[112];
+                                    _snprintf(b, sizeof(b) - 1,
+                                              "peer admitted id=%u claims=%u players=%u/%u proto=v%u",
+                                              (unsigned)id, (unsigned)claims.size(),
+                                              (unsigned)session_.owners().size(),
+                                              (unsigned)session_.maxPlayers(),
+                                              (unsigned)PROTOCOL_VERSION);
+                                    b[sizeof(b) - 1] = '\0';
+                                    netLog(b);
+                                    if (inbound_) inbound_->pushConnect(id);
+                                }
                             }
                         }
                     } else if (!isHost_ && type == PKT_WELCOME) {
@@ -515,6 +667,8 @@ void NetLink::threadLoop() {
                                 netErr(b);
                             } else {
                                 InterlockedExchange(&myId_, (LONG)w.playerId);
+                                activeOwners_.insert(0);
+                                activeOwners_.insert(w.playerId);
                                 char b[96];
                                 _snprintf(b, sizeof(b) - 1,
                                           "peer connected id=%u (proto v%u) - received WELCOME",
@@ -524,6 +678,58 @@ void NetLink::threadLoop() {
                                 if (inbound_) inbound_->pushConnect(0); // host id = 0
                             }
                         }
+                    } else if (!isHost_ && type == PKT_PEER_STATUS) {
+                        bool present = false;
+                        u32 ownerId = OWNER_ID_ALL;
+                        SessionRegistry::SquadClaims claims;
+                        if (decodePeerStatus(ev.packet->data,
+                                             (unsigned)ev.packet->dataLength,
+                                             present, ownerId, claims)) {
+                            if (present) {
+                                const bool wasNew = activeOwners_.insert(ownerId).second;
+                                if (wasNew && inbound_) inbound_->pushConnect(ownerId);
+                            } else if (activeOwners_.erase(ownerId) != 0) {
+                                epochSeen_.erase(ownerId);
+                                if (inbound_) inbound_->pushLeave(ownerId);
+                            }
+                        }
+                    } else if (!isHost_ && type == PKT_REJECT) {
+                        RejectPacket reject;
+                        if (readPacket(ev.packet->data,
+                                       (unsigned)ev.packet->dataLength, &reject)) {
+                            char b[96];
+                            _snprintf(b, sizeof(b) - 1,
+                                      "host rejected session reason=%u hostProto=v%u",
+                                      (unsigned)reject.reason, (unsigned)reject.version);
+                            b[sizeof(b) - 1] = '\0';
+                            netErr(b);
+                            enet_peer_disconnect(ev.peer, reject.reason);
+                        }
+                    } else if (!acceptGameplayPacket(
+                                   ev.peer, type, ev.packet->data,
+                                   (unsigned)ev.packet->dataLength)) {
+                        u32 packetOwner = OWNER_ID_ALL;
+                        const bool hasOwner = readPacketOwner(
+                            ev.packet->data, (unsigned)ev.packet->dataLength, packetOwner);
+                        const u32 sender = isHost_ && ev.peer
+                            ? (u32)(size_t)ev.peer->data : 0;
+                        char detail[192];
+                        _snprintf(detail, sizeof(detail) - 1,
+                                  "dropped packet type=%u len=%u sender=%u owner=%u "
+                                  "hasOwner=%u policy=%u framed=%u",
+                                  (unsigned)type, (unsigned)ev.packet->dataLength,
+                                  (unsigned)sender, (unsigned)packetOwner,
+                                  hasOwner ? 1u : 0u, (unsigned)packetPolicy(type),
+                                  gameplayPacketFramingValid(
+                                      type, ev.packet->data,
+                                      (unsigned)ev.packet->dataLength) ? 1u : 0u);
+                        detail[sizeof(detail) - 1] = '\0';
+                        netErr(detail);
+                        if (isHost_)
+                            rejectPeer(ev.peer, (u8)REJECT_UNAUTHORIZED,
+                                       "disconnecting sender after invalid gameplay packet");
+                        else
+                            enet_peer_disconnect(ev.peer, REJECT_UNAUTHORIZED);
                     } else if (type == PKT_ENTITY_BATCH) {
                         const unsigned len = (unsigned)ev.packet->dataLength;
                         if (len >= sizeof(EntityBatchHeader) && inbound_) {
@@ -970,20 +1176,23 @@ void NetLink::threadLoop() {
                             }
                         }
                     }
+                    // Explicit star policy: only validated state packets authored
+                    // by an admitted join are copied to the other joins. Host-only
+                    // intent packets have POLICY_CLIENT_TO_HOST and stop here.
+                    if (isHost_ && packetRelayedByHost(type))
+                        relayToOthers(ev.peer, ev.channelID, ev.packet);
                     enet_packet_destroy(ev.packet);
                     break;
                 }
                 case ENET_EVENT_TYPE_DISCONNECT: {
-                    epochSeen_.clear(); // peer gone; its epoch sequence ends (v44)
                     if (isHost_) {
                         u32 id = (u32)(size_t)ev.peer->data;
                         ev.peer->data = 0;
-                        if (inbound_) inbound_->pushLeave(id);
-                        char b[64];
-                        _snprintf(b, sizeof(b) - 1, "peer disconnected id=%u", (unsigned)id);
-                        b[sizeof(b) - 1] = '\0';
-                        netLog(b);
+                        if (id != 0) dropPeer(id, true);
+                        else netLog("unadmitted peer disconnected");
                     } else {
+                        epochSeen_.clear();
+                        activeOwners_.clear();
                         serverPeer_ = 0;
                         if (inbound_) inbound_->pushLeave(OWNER_ID_ALL);
                         netLog("disconnected from host");
@@ -1035,7 +1244,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&events[i], sizeof(EventPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1060,7 +1269,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&drops[i], sizeof(WorldDropPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1077,7 +1286,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&pickups[i], sizeof(WorldPickupPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1114,7 +1323,7 @@ void NetLink::threadLoop() {
                 std::memcpy(out->data + sizeof(hdr), &invs[i].items[0],
                             count * sizeof(InvItemEntry));
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1147,7 +1356,7 @@ void NetLink::threadLoop() {
                 std::memcpy(out->data + sizeof(hdr), &wis[i].items[0],
                             count * sizeof(WorldItemEntry));
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1168,7 +1377,7 @@ void NetLink::threadLoop() {
             if (count > 0)
                 std::memcpy(out->data + sizeof(hdr), &wrs[i].netIds[0], count * sizeof(u32));
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1192,7 +1401,7 @@ void NetLink::threadLoop() {
             if (count > 0)
                 std::memcpy(out->data + sizeof(hdr), &wcs[i].netIds[0], count * sizeof(u32));
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1229,7 +1438,7 @@ void NetLink::threadLoop() {
                     std::memcpy(pp, &censuses[i].pos[0], count * 3 * sizeof(float));
             }
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1247,7 +1456,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&xfers[i], sizeof(InvXferPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1264,7 +1473,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&xferAcks[i], sizeof(InvXferAckPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1287,7 +1496,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&meds[i], sizeof(MedicalPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1298,7 +1507,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&treats[i], sizeof(TreatmentPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1309,7 +1518,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&combatHits[i], sizeof(CombatHitPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1328,7 +1537,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&speeds[i], sizeof(SpeedPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1347,7 +1556,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&statPkts[i], sizeof(StatsPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1367,7 +1576,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&moneyPkts[i], sizeof(MoneyPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1387,7 +1596,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&moneyDeltaPkts[i], sizeof(MoneyDeltaPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1407,7 +1616,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&facPkts[i], sizeof(FactionPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1426,7 +1635,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&timePkts[i], sizeof(TimePacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1446,7 +1655,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&doorPkts[i], sizeof(DoorPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1466,7 +1675,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&prodPkts[i], sizeof(ProdPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1486,7 +1695,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&researchPkts[i], sizeof(ResearchPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1506,7 +1715,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&deedPkts[i], sizeof(DeedPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1525,7 +1734,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&fixPkts[i], sizeof(FixturePacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1550,7 +1759,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&buildPlacePkts[i], sizeof(BuildPlacePacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1561,7 +1770,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&buildStatePkts[i], sizeof(BuildStatePacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1584,7 +1793,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&buildDoorPkts[i], sizeof(BuildDoorPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1595,7 +1804,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&buildRemovePkts[i], sizeof(BuildRemovePacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1614,7 +1823,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&stealthPkts[i], sizeof(StealthPacket),
                                                  0 /*unreliable*/);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_UNRELIABLE, out);
+                broadcastToAdmitted(CH_UNRELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_UNRELIABLE, out);
             } else {
@@ -1633,7 +1842,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&camHints[i], sizeof(CamHintPacket),
                                                  0 /*unreliable*/);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_UNRELIABLE, out);
+                broadcastToAdmitted(CH_UNRELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_UNRELIABLE, out);
             } else {
@@ -1653,7 +1862,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&cellClaims[i], sizeof(CellClaimPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1676,7 +1885,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&spawnReqs[i], sizeof(SpawnReqPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1687,7 +1896,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&spawnInfos[i], sizeof(SpawnInfoPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+                broadcastToAdmitted(CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
@@ -1718,7 +1927,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&saveReqs[i], sizeof(SaveReqPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_BULK, out);
+                broadcastToAdmitted(CH_BULK, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_BULK, out);
             } else {
@@ -1729,7 +1938,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&saveBegins[i], sizeof(SaveBeginPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_BULK, out);
+                broadcastToAdmitted(CH_BULK, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_BULK, out);
             } else {
@@ -1744,7 +1953,7 @@ void NetLink::threadLoop() {
                 std::memcpy(out->data + sizeof(SaveFileHeader), &saveFiles[i].tail[0],
                             saveFiles[i].tail.size());
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_BULK, out);
+                broadcastToAdmitted(CH_BULK, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_BULK, out);
             } else {
@@ -1760,7 +1969,7 @@ void NetLink::threadLoop() {
                 std::memcpy(out->data + sizeof(SaveDoneHeader), &saveDones[i].crcs[0],
                             saveDones[i].crcs.size() * sizeof(u32));
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_BULK, out);
+                broadcastToAdmitted(CH_BULK, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_BULK, out);
             } else {
@@ -1771,7 +1980,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&saveAcks[i], sizeof(SaveAckPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_BULK, out);
+                broadcastToAdmitted(CH_BULK, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_BULK, out);
             } else {
@@ -1796,7 +2005,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&loadGos[i], sizeof(LoadGoPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_BULK, out);
+                broadcastToAdmitted(CH_BULK, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_BULK, out);
             } else {
@@ -1807,7 +2016,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&loadReqs[i], sizeof(LoadReqPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_BULK, out);
+                broadcastToAdmitted(CH_BULK, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_BULK, out);
             } else {
@@ -1818,7 +2027,7 @@ void NetLink::threadLoop() {
             ENetPacket* out = enet_packet_create(&loadNacks[i], sizeof(LoadNackPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_BULK, out);
+                broadcastToAdmitted(CH_BULK, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_BULK, out);
             } else {
@@ -1858,7 +2067,7 @@ void NetLink::threadLoop() {
                 std::memcpy(out->data, &hdr, sizeof(hdr));
                 std::memcpy(out->data + sizeof(hdr), &ents[off], count * sizeof(EntityState));
                 if (isHost_) {
-                    enet_host_broadcast(enetHost_, CH_UNRELIABLE, out);
+                    broadcastToAdmitted(CH_UNRELIABLE, out);
                 } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                     enet_peer_send(serverPeer_, CH_UNRELIABLE, out);
                 } else {
@@ -1868,6 +2077,17 @@ void NetLink::threadLoop() {
         }
     }
 
+    // A normal client shutdown must produce an immediate host-side departure
+    // edge.  Destroying an ENetHost alone sends no notification and makes the
+    // host wait for its timeout, which leaves squad claims and owner state live
+    // for tens of seconds.  The unsequenced disconnect is flushed synchronously
+    // by ENet before it resets this peer.
+    if (!isHost_ && serverPeer_ &&
+        serverPeer_->state != ENET_PEER_STATE_DISCONNECTED &&
+        serverPeer_->state != ENET_PEER_STATE_ZOMBIE) {
+        enet_peer_disconnect_now(serverPeer_, 0);
+        serverPeer_ = 0;
+    }
     if (enetHost_) { enet_host_destroy(enetHost_); enetHost_ = 0; }
     if (steam) steamp2p::removeEnetHooks();
     InterlockedExchange(&running_, 0);
